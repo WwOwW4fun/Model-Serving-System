@@ -1,0 +1,64 @@
+# Version control and repository metadata
+.git
+.gitignore
+.github
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments and caches
+venv
+.venv
+env
+ENV
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Tests, coverage, and development artifacts
+tests
+pytest.ini
+.coverage
+.coverage.*
+coverage.xml
+htmlcov
+.tox
+.nox
+
+# Documentation and deployment files not needed by the API image
+docs
+kubernetes
+monitoring
+docker-compose.yml
+README.md
+
+# Build and packaging artifacts
+build
+dist
+*.egg-info
+.eggs
+
+# Runtime and local data
+logs
+*.log
+*.pid
+*.db
+*.sqlite
+*.sqlite3
+
+# Model artifacts are mounted or downloaded separately
+models
+*.pt
+*.pth
+*.onnx
+*.ckpt
+
+# IDE and operating-system files
+.vscode
+.idea
+.DS_Store
+Thumbs.db
