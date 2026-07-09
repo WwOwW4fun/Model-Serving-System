@@ -21,8 +21,8 @@ import logging
 # TODO: Import your model loading utilities
 # from .model import ModelInference, load_model
 
-# TODO: Import Prometheus metrics library
-# from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+# Import Prometheus metrics library
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
