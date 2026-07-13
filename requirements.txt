@@ -21,6 +21,7 @@ Pillow==10.1.0            # Image manipulation library
 # Data Handling
 numpy==1.26.2             # Numerical computing
 pydantic==2.5.0           # Data validation using Python type hints
+pydantic-settings==2.1.0  # Environment-based application settings
 
 # HTTP Client (for URL-based predictions)
 httpx==0.25.2             # Async HTTP client

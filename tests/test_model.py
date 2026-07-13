@@ -41,8 +41,12 @@ def lightweight_model(monkeypatch):
         "_load_class_labels",
         lambda self: [f"class_{i}" for i in range(1000)],
     )
-    monkeypatch.setattr(model_module.models, "resnet18", lambda pretrained=True: TinyImageNetModel())
-    monkeypatch.setattr(model_module.models, "resnet50", lambda pretrained=True: TinyImageNetModel())
+    monkeypatch.setattr(
+        model_module.models, "resnet18", lambda pretrained=True: TinyImageNetModel()
+    )
+    monkeypatch.setattr(
+        model_module.models, "resnet50", lambda pretrained=True: TinyImageNetModel()
+    )
 
 
 @pytest.fixture
@@ -186,7 +190,9 @@ def test_predict_with_threshold(model_inference, sample_image):
     if "threshold" not in model_inference.predict.__code__.co_varnames:
         pytest.skip("confidence threshold is not implemented")
 
-    result = model_inference.predict(image_to_bytes(sample_image), top_k=10, threshold=0.1)
+    result = model_inference.predict(
+        image_to_bytes(sample_image), top_k=10, threshold=0.1
+    )
     assert all(pred["confidence"] >= 0.1 for pred in result)
 
 
@@ -207,7 +213,9 @@ def test_batch_inference(model_inference):
     if not hasattr(model_inference, "predict_batch"):
         pytest.skip("predict_batch is not implemented")
 
-    images = [image_to_bytes(Image.new("RGB", (224, 224), color="red")) for _ in range(4)]
+    images = [
+        image_to_bytes(Image.new("RGB", (224, 224), color="red")) for _ in range(4)
+    ]
     results = model_inference.predict_batch(images, top_k=5)
 
     assert len(results) == 4

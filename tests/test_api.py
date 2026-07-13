@@ -27,6 +27,36 @@ class FakeModel:
         ]
 
 
+@pytest.mark.asyncio
+async def test_application_lifespan(monkeypatch):
+    import src.api as api_module
+
+    model = FakeModel()
+    model.model = object()
+    monkeypatch.setattr(api_module, "load_model", lambda name: model)
+    monkeypatch.setattr(api_module.torch.cuda, "is_available", lambda: False)
+
+    async with api_module.lifespan(api_module.app):
+        assert api_module.app.state.model is model
+
+    assert api_module.app.state.model is None
+    assert model.model is None
+
+
+@pytest.mark.asyncio
+async def test_application_lifespan_reports_load_failure(monkeypatch):
+    import src.api as api_module
+
+    def fail_to_load(name):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(api_module, "load_model", fail_to_load)
+
+    with pytest.raises(RuntimeError, match="model unavailable"):
+        async with api_module.lifespan(api_module.app):
+            pass
+
+
 @pytest.fixture
 def client():
     from src.api import app

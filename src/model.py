@@ -5,14 +5,14 @@ This module handles loading the ML model and running inference.
 Complete the TODOs to implement model loading and prediction logic.
 """
 
+import io
+import logging
+from typing import Any, Dict, List
+
 import torch
 import torchvision.models as models
 import torchvision.transforms as transforms
-from typing import List, Tuple, Dict, Any
 from PIL import Image
-import io
-import logging
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +98,10 @@ class ModelInference:
                 self.model = models.resnet50(pretrained=True)
             else:
                 raise ValueError(f"Unsupported model: {self.model_name}")
-            
-            if not torch.cuda.is_available() and self.device.type == 'cuda':
+
+            if not torch.cuda.is_available() and self.device.type == "cuda":
                 logger.warning("CUDA not available, falling back to CPU")
-                self.device = torch.device('cpu')
+                self.device = torch.device("cpu")
 
             self.model.eval()  # Set to evaluation mode
             self.model.to(self.device)
@@ -132,16 +132,16 @@ class ModelInference:
         If using a different model, adjust accordingly.
         """
 
-        return transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            ),
-        ])
-        
+        return transforms.Compose(
+            [
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ]
+        )
 
     def _load_class_labels(self) -> List[str]:
         """
@@ -165,14 +165,15 @@ class ModelInference:
 
         # TODO: Load class labels from file or URL
         import urllib.request
-        try: 
+
+        try:
             url = "https://raw.githubusercontent.com/pytorch/hub/master/imagenet_classes.txt"
             with urllib.request.urlopen(url) as response:
-                classes = [line.decode('utf-8').strip() for line in response]
+                classes = [line.decode("utf-8").strip() for line in response]
 
         except Exception as e:
             logger.error(f"Failed to download class labels from url {url}: {e}")
-        # Placeholder
+            # Placeholder
             classes = [f"class_{i}" for i in range(1000)]
         return classes
 
@@ -212,27 +213,26 @@ class ModelInference:
         - Invalid image bytes → ValueError
         - Corrupt image → IOError
         - Unsupported format → ValueError
-        """ 
+        """
         from PIL import Image, UnidentifiedImageError
 
         SUPPORTED_IMAGE_FORMATS = {"JPEG", "PNG"}
-        try: 
-            image = Image.open(io.BytesIO(image_bytes)) 
+        try:
+            image = Image.open(io.BytesIO(image_bytes))
             image.verify()
-            image = Image.open(io.BytesIO(image_bytes)) 
+            image = Image.open(io.BytesIO(image_bytes))
         except UnidentifiedImageError as e:
             raise ValueError("Invalid image bytes") from e
         except IOError as e:
             raise IOError("Corrupt image data") from e
 
-        #check unsupportted format
+        # check unsupportted format
         if image.format not in SUPPORTED_IMAGE_FORMATS:
             raise ValueError("Unsupported image format")
-        
 
         # Convert to RGB if needed
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
+        if image.mode != "RGB":
+            image = image.convert("RGB")
 
         # Apply transforms
         input_tensor = self.preprocess(image)
@@ -242,12 +242,7 @@ class ModelInference:
 
         return input_batch
 
-
-    def predict(
-        self,
-        image_bytes: bytes,
-        top_k: int = 5
-    ) -> List[Dict[str, Any]]:
+    def predict(self, image_bytes: bytes, top_k: int = 5) -> List[Dict[str, Any]]:
         """
         TODO: Run inference and return predictions
 
@@ -265,7 +260,7 @@ class ModelInference:
         4. Apply softmax to get probabilities
         5. Get top-k predictions
         6. Format results
-        7. Return predictions 
+        7. Return predictions
 
         Return Format:
         [
@@ -306,20 +301,17 @@ class ModelInference:
         predictions = []
         for i in range(top_k):
             class_id = int(top_indices[i])
-            predictions.append({
-                'class_id': class_id,
-                'class_name': self.classes[class_id],
-                'confidence': float(top_probs[i])
-            })
+            predictions.append(
+                {
+                    "class_id": class_id,
+                    "class_name": self.classes[class_id],
+                    "confidence": float(top_probs[i]),
+                }
+            )
 
         return predictions
 
-
-    def predict_from_url(
-        self,
-        image_url: str,
-        top_k: int = 5
-    ) -> List[Dict[str, Any]]:
+    def predict_from_url(self, image_url: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """
         TODO: Download image from URL and run prediction
 
@@ -350,8 +342,9 @@ class ModelInference:
         - Download timeout → requests.Timeout
         - HTTP error → requests.HTTPError
         """
-        import requests
         from urllib.parse import urlparse
+
+        import requests
 
         if not isinstance(image_url, str) or not image_url.strip():
             raise ValueError("image_url must be a non-empty string")
@@ -369,10 +362,7 @@ class ModelInference:
             logger.error("Timed out while downloading image from %s", image_url)
             raise
         except requests.HTTPError:
-            logger.error(
-                "HTTP error while downloading image from %s",
-                image_url
-            )
+            logger.error("HTTP error while downloading image from %s", image_url)
             raise
         except (requests.InvalidURL, requests.MissingSchema) as e:
             raise ValueError(f"Invalid image URL: {image_url}") from e
@@ -390,17 +380,17 @@ class ModelInference:
         Returns:
             Dictionary with model metadata
 
-    
+
         """
         # TODO: Implement model info
         return {
-            'model_name': self.model_name,
-            'device': str(self.device),
-            'loaded': self.model is not None,
-            'num_classes': len(self.classes) if self.classes else 0,
-            'input_size': (224, 224),
-            'framework': 'PyTorch',
-            'version': torch.__version__
+            "model_name": self.model_name,
+            "device": str(self.device),
+            "loaded": self.model is not None,
+            "num_classes": len(self.classes) if self.classes else 0,
+            "input_size": (224, 224),
+            "framework": "PyTorch",
+            "version": torch.__version__,
         }
 
 
@@ -408,10 +398,8 @@ class ModelInference:
 # Helper Functions
 # ==============================================================================
 
-def load_model( 
-    model_name: str = "resnet18",
-    device: str = "cpu"
-) -> ModelInference:
+
+def load_model(model_name: str = "resnet18", device: str = "cpu") -> ModelInference:
     """
     TODO: Convenience function to load model
 
@@ -475,21 +463,22 @@ def get_supported_models() -> List[str]:
         'efficientnet_b0',
     ]
     """
-    
+
     return [
-        'resnet18',
-        'resnet34',
-        'resnet50',
-        'resnet101',
-        'resnet152',
-        'mobilenet_v2',
-        'efficientnet_b0',
+        "resnet18",
+        "resnet34",
+        "resnet50",
+        "resnet101",
+        "resnet152",
+        "mobilenet_v2",
+        "efficientnet_b0",
     ]
 
 
 # ==============================================================================
 # Testing / Debug
 # ==============================================================================
+
 
 def test_model_loading():
     """
@@ -536,21 +525,21 @@ def test_model_loading():
     assert model.classes is not None, "Classes not loaded"
 
     # Test with dummy image
-    from PIL import Image
     import numpy as np
+    from PIL import Image
 
     dummy_image = Image.fromarray(
         np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8)
     )
     buffer = io.BytesIO()
-    dummy_image.save(buffer, format='JPEG')
+    dummy_image.save(buffer, format="JPEG")
     image_bytes = buffer.getvalue()
 
     predictions = model.predict(image_bytes, top_k=5)
 
     assert len(predictions) == 5, "Should return 5 predictions"
-    assert all('class_name' in p for p in predictions), "Missing class_name"
-    assert all('confidence' in p for p in predictions), "Missing confidence"
+    assert all("class_name" in p for p in predictions), "Missing class_name"
+    assert all("confidence" in p for p in predictions), "Missing confidence"
 
     print("✅ All tests passed for real!")
 
@@ -561,7 +550,7 @@ if __name__ == "__main__":
     """
     # TODO: Add command-line interface for testing
     # Example:
-    #python model.py --model resnet18 --image path/to/image.jpg
+    # python model.py --model resnet18 --image path/to/image.jpg
 
     print("Model inference module")
     print("Run test_model_loading() to verify functionality")
