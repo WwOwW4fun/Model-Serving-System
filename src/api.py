@@ -17,9 +17,10 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 import time
 import logging
+from fastapi.responses import JSONResponse, Response
 
-# TODO: Import your model loading utilities
-# from .model import ModelInference, load_model
+#  Import model loading utilities
+from src.model import ModelInference, load_model  
 
 # Import Prometheus metrics library
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
@@ -35,38 +36,26 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# ==============================================================================
-# TODO: Initialize Prometheus Metrics
-# ==============================================================================
-"""
-Create the following Prometheus metrics:
-
-1. request_count - Counter for total requests
-   Labels: endpoint, method, status_code
-
-2. request_duration - Histogram for request duration
-   Labels: endpoint, method
-
-3. prediction_count - Counter for successful predictions
-
-4. error_count - Counter for errors
-   Labels: error_type
-
-Example:
-from prometheus_client import Counter
-
+# Initialize Prometheus Metrics
 request_count = Counter(
     'api_requests_total',
     'Total API requests',
     ['endpoint', 'method', 'status_code']
 )
-"""
-
-# TODO: Create Prometheus metrics here
-# request_count = Counter(...)
-# request_duration = Histogram(...)
-# prediction_count = Counter(...)
-# error_count = Counter(...)
+request_duration = Histogram(
+    'api_request_duration_seconds',
+    'API request duration in seconds',
+    ['endpoint', 'method']
+)
+prediction_count = Counter(
+    'api_predictions_total',
+    'Total successful predictions'
+)
+error_count = Counter(
+    'api_errors_total',
+    'Total API errors',
+    ['error_type']
+)
 
 
 # ==============================================================================
@@ -90,8 +79,9 @@ class PredictionRequest(BaseModel):
         top_k: int = Field(default=5, ge=1, le=10)
         threshold: float = Field(default=0.0, ge=0.0, le=1.0)
     """
-    # TODO: Implement request model fields
-    pass
+    image_url: Optional[str] = None
+    top_k: int = Field(default=5, ge=1, le=10)
+    threshold: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class Prediction(BaseModel):
@@ -111,8 +101,9 @@ class Prediction(BaseModel):
         class_name: str
         confidence: float = Field(..., ge=0.0, le=1.0)
     """
-    # TODO: Implement prediction model fields
-    pass
+    class_id: int #Predicted class ID
+    class_name: str # class name
+    confidence: float = Field(..., ge=0.0, le=1.0) #Prediction confidence score 
 
 
 class PredictionResponse(BaseModel):
@@ -132,9 +123,9 @@ class PredictionResponse(BaseModel):
         inference_time_ms: float
         model_version: str
     """
-    # TODO: Implement response model fields
-    pass
-
+    predictions: List[Prediction]
+    inference_time_ms:float
+    model_version: str
 
 class HealthResponse(BaseModel):
     """
@@ -148,8 +139,11 @@ class HealthResponse(BaseModel):
     - version: str - API version
     - uptime_seconds: float - Time since startup
     """
-    # TODO: Implement health response fields
-    pass
+    status: str
+    model_loaded: bool
+    version: str
+    uptime_seconds: float
+    device: str = "unknown"
 
 
 # ==============================================================================
@@ -167,6 +161,10 @@ Example:
 app.state.model = None
 app.state.start_time = time.time()
 """
+
+app.state.model = None
+app.state.start_time = time.time()
+app.state.request_count_local = 0
 
 
 @app.on_event("startup")
@@ -194,17 +192,16 @@ async def startup_event():
     """
     logger.info("Starting ML Model Serving API...")
 
-    # TODO: Implement model loading
-    # try:
-    #     logger.info("Loading model...")
-    #     app.state.model = load_model()
-    #     app.state.start_time = time.time()
-    #     logger.info("Model loaded successfully")
-    # except Exception as e:
-    #     logger.error(f"Failed to load model: {e}")
-    #     raise
 
-    pass
+    try:
+        logger.info("Loading model...")
+        app.state.model = load_model("resnet18")
+        app.state.start_time = time.time()
+        logger.info("Model loaded successfully")
+    except Exception as e:
+        logger.error(f"Failed to load model: {e}")
+        raise 
+
 
 
 @app.on_event("shutdown")
@@ -218,8 +215,22 @@ async def shutdown_event():
     - Close any open connections
     """
     logger.info("Shutting down ML Model Serving API...")
-    # TODO: Implement cleanup
-    pass
+    try:
+        model_inference = getattr(app.state, "model", None)
+
+        if model_inference is not None:
+            model_inference.model = None
+            app.state.model = None
+
+        # Release cached CUDA memory when using a GPU
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        logger.info("Shutdown cleanup completed")
+
+    except Exception:
+        logger.exception("Error during shutdown cleanup")
 
 
 # ==============================================================================
@@ -263,6 +274,18 @@ async def track_requests(request: Request, call_next):
     duration = time.time() - start_time
 
     # TODO: Update Prometheus metrics
+
+    request_count.labels(
+        endpoint=request.url.path,
+        method=request.method,
+        status_code=response.status_code
+    ).inc()
+
+    request_duration.labels(
+        endpoint=request.url.path,
+        method=request.method
+    ).observe(duration)
+
     # TODO: Log request
     logger.info(f"{request.method} {request.url.path} - {response.status_code} - {duration:.3f}s")
 
@@ -275,32 +298,14 @@ async def track_requests(request: Request, call_next):
 
 @app.get("/")
 async def root():
-    """
-    Root endpoint - API information
-
-    TODO: Return API information
-
-    Should include:
-    - API name
-    - Version
-    - Status
-    - Documentation link
-
-    Example:
+    
+    # TODO: Implement root endpoint
     return {
         "name": "ML Model Serving API",
         "version": "1.0.0",
         "status": "running",
         "docs": "/docs"
     }
-    """
-    # TODO: Implement root endpoint
-    return {
-        "message": "ML Model Serving API",
-        "status": "running",
-        "docs": "/docs"
-    }
-
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -335,18 +340,27 @@ async def health_check():
     - Used by liveness probe (is app running?)
     - Used by readiness probe (can app serve traffic?)
     """
-    # TODO: Implement health check logic
-    # TODO: Check if model is loaded
-    # TODO: Return appropriate status
 
-    # Placeholder implementation
+    status: str
+    model_loaded: bool
+    version: str
+    uptime_seconds: float
+    device: str
+
+    model_loaded = app.state.model is not None
+
+    if not model_loaded:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    device = getattr(app.state.model, "device", "unknown")
+
     return HealthResponse(
         status="healthy",
-        model_loaded=False,  # TODO: Check actual model status
+        model_loaded=True,
         version="1.0.0",
-        uptime_seconds=0.0  # TODO: Calculate actual uptime
+        uptime_seconds=time.time() - app.state.start_time,
+        device=str(device)
     )
-
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict(file: UploadFile = File(...), top_k: int = 5):
@@ -395,7 +409,7 @@ async def predict(file: UploadFile = File(...), top_k: int = 5):
     - Inference error → HTTP 500
 
     Example Implementation Structure:
-
+"""
     try:
         # Validate input
         if file.content_type not in ["image/jpeg", "image/png"]:
@@ -403,11 +417,15 @@ async def predict(file: UploadFile = File(...), top_k: int = 5):
 
         # Read and preprocess
         image_bytes = await file.read()
-        image = preprocess_image(image_bytes)
+        if len(image_bytes) > 10 * 1024 * 1024:
+            raise HTTPException(413, "File too large")
+        if not 1 <= top_k <= 10:
+            raise HTTPException(400, "top_k must be between 1 and 10")
+        preprocess_image(image_bytes)
 
         # Run inference
         start_time = time.time()
-        predictions = app.state.model.predict(image, top_k=top_k)
+        predictions = app.state.model.predict(image_bytes, top_k=top_k)
         inference_time = (time.time() - start_time) * 1000  # ms
 
         # Update metrics
@@ -419,7 +437,9 @@ async def predict(file: UploadFile = File(...), top_k: int = 5):
             inference_time_ms=inference_time,
             model_version="1.0.0"
         )
-
+    except HTTPException as e:
+        error_count.labels(error_type="http").inc()
+        raise e
     except ValueError as e:
         error_count.labels(error_type="validation").inc()
         raise HTTPException(400, str(e))
@@ -427,18 +447,6 @@ async def predict(file: UploadFile = File(...), top_k: int = 5):
         error_count.labels(error_type="inference").inc()
         logger.error(f"Prediction error: {e}")
         raise HTTPException(500, "Inference failed")
-    """
-    # TODO: Implement prediction logic
-
-    # Placeholder - remove and implement
-    raise HTTPException(501, "Prediction endpoint not implemented yet")
-
-    # Your implementation here:
-    # 1. Validate input
-    # 2. Preprocess image
-    # 3. Run inference
-    # 4. Format response
-    # 5. Update metrics
 
 
 @app.get("/metrics")
@@ -476,11 +484,13 @@ async def metrics():
           - targets: ['ml-api:8000']
         metrics_path: '/metrics'
     """
-    # TODO: Implement metrics endpoint
-    # TODO: Return Prometheus-formatted metrics
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
-    # Placeholder
-    return {"message": "Metrics endpoint not implemented"}
+    metrics_data = generate_latest()
+    return Response(
+        content=metrics_data,
+        media_type=CONTENT_TYPE_LATEST
+    )
 
 
 # ==============================================================================
@@ -519,9 +529,25 @@ def preprocess_image(image_bytes: bytes):
     input_batch = input_tensor.unsqueeze(0)
     return input_batch
     """
-    # TODO: Implement preprocessing
-    pass
+    from PIL import Image
+    import io
+    from torchvision import transforms
 
+    image = Image.open(io.BytesIO(image_bytes))
+
+    preprocess = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        ),
+    ])
+
+    input_tensor = preprocess(image)
+    input_batch = input_tensor.unsqueeze(0)
+    return input_batch
 
 def format_predictions(outputs, top_k: int):
     """
@@ -551,8 +577,20 @@ def format_predictions(outputs, top_k: int):
 
     return predictions
     """
-    # TODO: Implement prediction formatting
-    pass
+    import torch.nn.functional as F
+
+    probabilities = F.softmax(outputs, dim=1)
+    top_probs, top_indices = torch.topk(probabilities, top_k)
+
+    predictions = []
+    for i in range(top_k):
+        predictions.append(Prediction(
+            class_id=int(top_indices[0][i]),
+            class_name=get_class_name(int(top_indices[0][i])),
+            confidence=float(top_probs[0][i])
+        ))
+
+    return predictions
 
 
 def get_class_name(class_id: int) -> str:
@@ -568,8 +606,10 @@ def get_class_name(class_id: int) -> str:
 
     return classes[class_id]
     """
-    # TODO: Implement class name mapping
-    return f"class_{class_id}"  # Placeholder
+    with open('imagenet_classes.txt', 'r') as f:
+        classes = [line.strip() for line in f.readlines()]
+
+    return classes[class_id]
 
 
 # ==============================================================================
@@ -597,6 +637,7 @@ if __name__ == "__main__":
         "api:app",
         host="0.0.0.0",
         port=8000,
+        workers = 1,
         reload=True,  # Auto-reload on code changes
         log_level="info"
     )

@@ -13,7 +13,7 @@ Students should implement configuration loading and validation.
 
 import os
 from typing import Optional, List
-from pydantic import BaseSettings, Field, validator
+from pydantic import BaseSettings, Field, field_validator
 from pathlib import Path
 
 
