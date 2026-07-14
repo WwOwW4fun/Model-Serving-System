@@ -1,249 +1,184 @@
-# API Documentation - ML Model Serving
+# API reference
+
+The service exposes a small HTTP API for ImageNet image classification, health checks, and Prometheus metrics. FastAPI also generates an OpenAPI schema and interactive documentation.
 
 ## Base URL
 
-- Local: `http://localhost:8000`
-- Production: `https://api.your-domain.com`
+For local development:
 
-## Authentication
-
-Currently no authentication required. TODO: Add API key authentication for production.
-
----
-
-## Endpoints
-
-### 1. Health Check
-
-**Endpoint:** `GET /health`
-
-**Description:** Check if the service is healthy and ready to serve requests.
-
-**Response:**
-```json
-{
-  "status": "healthy",
-  "model_loaded": true,
-  "version": "1.0.0"
-}
+```text
+http://localhost:8000
 ```
 
-**Status Codes:**
-- `200 OK` - Service is healthy
-- `503 Service Unavailable` - Service is not ready
+When deployed behind the Kubernetes `LoadBalancer` service, replace the host with the service address.
 
----
+The API does not currently require authentication. Add authentication and TLS before exposing it to an untrusted network.
 
-### 2. Metrics
+## Quick example
 
-**Endpoint:** `GET /metrics`
-
-**Description:** Prometheus-formatted metrics for monitoring.
-
-**Response:** (Prometheus format)
-```
-# HELP predictions_total Total number of predictions
-# TYPE predictions_total counter
-predictions_total{status="success"} 1234
-predictions_total{status="error"} 56
-
-# HELP prediction_duration_seconds Time spent on inference
-# TYPE prediction_duration_seconds histogram
-prediction_duration_seconds_bucket{le="0.01"} 100
-...
-```
-
----
-
-### 3. Predict (Image Classification)
-
-**Endpoint:** `POST /v1/predict`
-
-**Description:** Classify an uploaded image.
-
-**Request:**
-
-*Content-Type:* `multipart/form-data`
-
-**Parameters:**
-- `file` (required): Image file (JPEG, PNG)
-- `top_k` (optional): Number of top predictions to return (default: 5, max: 10)
-
-**Example (cURL):**
 ```bash
-curl -X POST "http://localhost:8000/v1/predict" \
-  -F "file=@cat.jpg" \
-  -F "top_k=3"
+curl -X POST 'http://localhost:8000/predict?top_k=5' \
+  -F 'file=@cat.jpg;type=image/jpeg'
 ```
 
-**Example (Python):**
-```python
-import requests
+Example response:
 
-url = "http://localhost:8000/v1/predict"
-files = {"file": open("cat.jpg", "rb")}
-data = {"top_k": 3}
-
-response = requests.post(url, files=files, data=data)
-print(response.json())
-```
-
-**Response (Success):**
 ```json
 {
   "predictions": [
     {
       "class_id": 281,
-      "class_name": "tabby_cat",
-      "probability": 0.95
+      "class_name": "tabby",
+      "confidence": 0.7431
     },
     {
       "class_id": 282,
-      "class_name": "tiger_cat",
-      "probability": 0.03
-    },
-    {
-      "class_id": 285,
-      "class_name": "Egyptian_cat",
-      "probability": 0.01
+      "class_name": "tiger cat",
+      "confidence": 0.1835
     }
   ],
-  "inference_time_ms": 25,
-  "model_version": "resnet18-v1",
-  "request_id": "uuid-1234-5678"
+  "inference_time_ms": 42.7,
+  "model_version": "1.0.0"
 }
 ```
 
-**Response (Error):**
-```json
-{
-  "detail": "Invalid image format. Supported formats: JPEG, PNG",
-  "error_code": "INVALID_INPUT"
-}
-```
+Prediction values depend on the uploaded image and loaded model.
 
-**Status Codes:**
-- `200 OK` - Prediction successful
-- `400 Bad Request` - Invalid input
-- `413 Payload Too Large` - Image file too large (max 10MB)
-- `500 Internal Server Error` - Server error
-- `503 Service Unavailable` - Model not loaded
+## Endpoints
 
----
+### `GET /`
 
-### 4. Batch Predict (TODO)
+Returns basic service information.
 
-**Endpoint:** `POST /v1/batch-predict`
-
-**Description:** Classify multiple images in a single request.
-
-**Request:**
-*Content-Type:* `multipart/form-data`
-
-**Parameters:**
-- `files`: Array of image files
-
-**Example:**
 ```bash
-curl -X POST "http://localhost:8000/v1/batch-predict" \
-  -F "files=@cat1.jpg" \
-  -F "files=@cat2.jpg" \
-  -F "files=@dog1.jpg"
+curl http://localhost:8000/
 ```
 
-**Response:**
 ```json
 {
-  "results": [
-    {"filename": "cat1.jpg", "predictions": [...]},
-    {"filename": "cat2.jpg", "predictions": [...]},
-    {"filename": "dog1.jpg", "predictions": [...]}
-  ],
-  "total_inference_time_ms": 75
+  "name": "ML Model Serving API",
+  "version": "1.0.0",
+  "status": "running",
+  "docs": "/docs"
 }
 ```
 
----
+### `GET /health`
 
-## Error Codes
+Reports whether the API has a model available for inference.
 
-| Code | Description | Action |
-|------|-------------|--------|
-| `INVALID_INPUT` | Invalid request format | Check request format |
-| `FILE_TOO_LARGE` | File exceeds size limit | Reduce file size |
-| `UNSUPPORTED_FORMAT` | Unsupported file format | Use JPEG or PNG |
-| `MODEL_NOT_LOADED` | Model not ready | Wait and retry |
-| `INFERENCE_FAILED` | Model inference error | Report to support |
-| `INTERNAL_ERROR` | Server error | Report to support |
+```bash
+curl http://localhost:8000/health
+```
 
----
-
-## Rate Limits
-
-- **Development:** No limits
-- **Production:** 60 requests per minute per IP (TODO: Configure)
-
-Exceeded rate limit response:
 ```json
 {
-  "detail": "Rate limit exceeded. Try again in 60 seconds.",
-  "retry_after": 60
+  "status": "healthy",
+  "model_loaded": true,
+  "version": "1.0.0",
+  "uptime_seconds": 38.42,
+  "device": "cpu"
 }
 ```
 
----
+Responses:
 
-## ImageNet Classes
+| Status | Meaning |
+| --- | --- |
+| `200 OK` | The API is running and a model object is loaded. |
+| `503 Service Unavailable` | No model is loaded. |
 
-The model is trained on ImageNet with 1000 classes. See [ImageNet Class Labels](https://gist.github.com/yrevar/942d3a0ac09ec9e5eb3a).
+Docker and Kubernetes use this endpoint for health, readiness, and liveness checks.
 
-Common classes:
-- 281: tabby cat
-- 282: tiger cat
-- 207-294: various cat breeds
-- 151-268: various dog breeds
-- ...
+### `POST /predict`
 
----
+Classifies one uploaded JPEG or PNG image.
 
-## Interactive API Documentation
+Request:
 
-Visit `/docs` for interactive Swagger UI documentation:
-```
-http://localhost:8000/docs
-```
+- Content type: `multipart/form-data`
+- `file`: required image file
+- `top_k`: optional query parameter from `1` to `10`; default is `5`
+- Maximum file size: 10 MiB
 
-Visit `/redoc` for ReDoc documentation:
-```
-http://localhost:8000/redoc
+```bash
+curl -X POST 'http://localhost:8000/predict?top_k=3' \
+  -F 'file=@dog.png;type=image/png'
 ```
 
----
-
-## Client Libraries
-
-### Python
+Python example:
 
 ```python
-# TODO: Create Python client library
+import requests
+
+with open("dog.png", "rb") as image:
+    response = requests.post(
+        "http://localhost:8000/predict",
+        params={"top_k": 3},
+        files={"file": ("dog.png", image, "image/png")},
+        timeout=30,
+    )
+
+response.raise_for_status()
+print(response.json())
 ```
 
-### JavaScript
+Each prediction contains:
 
-```javascript
-// TODO: Create JavaScript client library
+| Field | Type | Description |
+| --- | --- | --- |
+| `class_id` | integer | ImageNet class index. |
+| `class_name` | string | ImageNet label, or a fallback `class_N` label if labels could not be downloaded. |
+| `confidence` | number | Softmax confidence between `0` and `1`. |
+
+The response also includes inference duration in milliseconds and the application model version.
+
+Common errors:
+
+| Status | Cause |
+| --- | --- |
+| `400 Bad Request` | Unsupported media type, invalid image bytes, or `top_k` outside `1–10`. |
+| `413 Payload Too Large` | Uploaded file exceeds 10 MiB. |
+| `422 Unprocessable Entity` | Required multipart `file` field is missing. |
+| `500 Internal Server Error` | Model inference failed. |
+
+Error responses use FastAPI's standard format:
+
+```json
+{
+  "detail": "Invalid image format"
+}
 ```
 
----
+### `GET /metrics`
 
-## Changelog
+Returns Prometheus text-format metrics.
 
-### v1.0.0 (2025-10-15)
-- Initial release
-- Image classification endpoint
-- Health check and metrics
+```bash
+curl http://localhost:8000/metrics
+```
 
-### Future Releases
-- v1.1.0: Batch prediction
-- v1.2.0: Video classification
-- v1.3.0: Model versioning and A/B testing
+Application metrics include:
+
+| Metric | Type | Description |
+| --- | --- | --- |
+| `api_requests_total` | Counter | Requests grouped by endpoint, method, and status code. |
+| `api_request_duration_seconds` | Histogram | HTTP request duration. |
+| `api_predictions_total` | Counter | Successful predictions. |
+| `api_errors_total` | Counter | Prediction errors grouped by error type. |
+
+The Python Prometheus client also exposes process and runtime metrics.
+
+## Interactive documentation
+
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
+- OpenAPI schema: `http://localhost:8000/openapi.json`
+
+## Current limitations
+
+- No authentication, authorization, or rate limiting is enforced.
+- Only one image can be classified per request.
+- JPEG and PNG are the only accepted upload formats.
+- The first startup requires network access if pretrained weights are not already cached.
+- Class labels fall back to generic names if the ImageNet label download fails.

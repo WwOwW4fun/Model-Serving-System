@@ -1,449 +1,238 @@
-# Deployment Guide - Project 01: Basic Model Serving
+# Deployment guide
+
+This guide covers direct development, Docker Compose, local Kubernetes, and the optional GitHub Actions deployment path.
 
 ## Prerequisites
 
-- Docker installed
-- Kubernetes cluster (minikube, kind, or cloud cluster)
-- kubectl configured
-- Python 3.11+
+- Python 3.10–3.12 for local development
+- Docker Desktop or another Docker engine
+- `kubectl` and a Kubernetes cluster for Kubernetes deployment
+- Minikube and Metrics Server for local autoscaling tests
+- Helm and Prometheus Operator only when using the ServiceMonitor
 
-## Deployment Options
+The first real-model startup may download pretrained ResNet weights and ImageNet class labels. Allow outbound internet access or pre-populate the model cache.
 
-1. [Local Development (Docker Compose)](#option-1-local-development)
-2. [Kubernetes (Minikube)](#option-2-kubernetes-local)
-3. [Cloud Kubernetes (GKE/EKS/AKS)](#option-3-cloud-kubernetes)
+## Run with Python
 
----
-
-## Option 1: Local Development (Docker Compose)
-
-### Step 1: Clone and Setup
+Create and activate a virtual environment, then install dependencies:
 
 ```bash
-cd projects/project-101-basic-model-serving
-
-# Create .env file
-cp .env.example .env
-# Edit .env as needed
-
-# Download pre-trained model (or use model download script)
-mkdir -p models
-# TODO: Add model download script
+python3 -m venv venv
+source venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-### Step 2: Build and Run
+Start the API:
 
 ```bash
-# Build and start all services
-docker-compose up -d
+python -m uvicorn src.api:app --host 0.0.0.0 --port 8000
+```
 
-# Check logs
-docker-compose logs -f api
+Verify it:
 
-# Verify services
+```bash
 curl http://localhost:8000/health
-curl http://localhost:9090  # Prometheus
-open http://localhost:3000  # Grafana (admin/admin)
-```
-
-### Step 3: Test API
-
-```bash
-# Test prediction
-curl -X POST "http://localhost:8000/v1/predict" \
-  -F "file=@test_image.jpg"
-
-# Check metrics
 curl http://localhost:8000/metrics
 ```
 
-### Step 4: Stop Services
+## Run with Docker
+
+Ensure the Docker daemon is running, then build the image:
 
 ```bash
-docker-compose down
-# Or keep data: docker-compose down --volumes
+docker build -t ml-model-serving:v1.0 .
 ```
 
----
-
-## Option 2: Kubernetes (Local - Minikube)
-
-### Step 1: Start Minikube
+Start a container:
 
 ```bash
-# Start minikube with enough resources
-minikube start --cpus=4 --memory=8192
-
-# Enable addons
-minikube addons enable metrics-server
-minikube addons enable ingress
-
-# Verify cluster
-kubectl cluster-info
-kubectl get nodes
+docker run --rm --name ml-model-serving \
+  -p 8000:8000 \
+  ml-model-serving:v1.0
 ```
 
-### Step 2: Build Docker Image
+Check container health and the API:
 
 ```bash
-# Build image
-docker build -t ml-api:v1 .
-
-# Load image into minikube
-minikube image load ml-api:v1
-
-# Verify
-minikube image ls | grep ml-api
-```
-
-### Step 3: Deploy to Kubernetes
-
-```bash
-# Create namespace
-kubectl create namespace ml-serving
-
-# Apply ConfigMap
-kubectl apply -f kubernetes/configmap.yaml -n ml-serving
-
-# Deploy application
-kubectl apply -f kubernetes/deployment.yaml -n ml-serving
-
-# Expose service
-kubectl apply -f kubernetes/service.yaml -n ml-serving
-
-# Setup autoscaling
-kubectl apply -f kubernetes/hpa.yaml -n ml-serving
-```
-
-### Step 4: Verify Deployment
-
-```bash
-# Check pods
-kubectl get pods -n ml-serving
-kubectl describe pod <pod-name> -n ml-serving
-
-# Check service
-kubectl get svc -n ml-serving
-
-# Check HPA
-kubectl get hpa -n ml-serving
-
-# View logs
-kubectl logs -f deployment/ml-api -n ml-serving
-```
-
-### Step 5: Access the API
-
-```bash
-# Get service URL
-minikube service ml-api-service -n ml-serving --url
-
-# Or use port-forward
-kubectl port-forward -n ml-serving svc/ml-api-service 8000:80
-
-# Test
+docker ps
 curl http://localhost:8000/health
 ```
 
-### Step 6: Deploy Monitoring
+Stop it with `Ctrl+C` or, from another terminal:
 
 ```bash
-# Install Prometheus (using Helm)
+docker stop ml-model-serving
+```
+
+## Run the complete local stack
+
+Docker Compose starts the API, Prometheus, and Grafana:
+
+```bash
+docker compose up --build -d
+docker compose ps
+docker compose logs -f api
+```
+
+Services:
+
+| Service | URL | Default credentials |
+| --- | --- | --- |
+| API | `http://localhost:8000` | None |
+| Prometheus | `http://localhost:9090` | None |
+| Grafana | `http://localhost:3000` | `admin` / `admin` |
+
+Change the Grafana password through `GRAFANA_PASSWORD` before using the stack outside local development.
+
+Stop the stack while retaining named volumes:
+
+```bash
+docker compose down
+```
+
+Remove the stack and stored Prometheus/Grafana data:
+
+```bash
+docker compose down --volumes
+```
+
+## Deploy to Minikube
+
+Start a cluster with enough memory for two model-serving pods:
+
+```bash
+minikube start --cpus=4 --memory=6144
+minikube addons enable metrics-server
+kubectl get nodes
+```
+
+Build and load the exact image name referenced by the Deployment:
+
+```bash
+docker build -t ml-model-serving:v1.0 .
+minikube image load ml-model-serving:v1.0
+```
+
+Apply the core resources in dependency order:
+
+```bash
+kubectl apply -f kubernetes/configmap.yaml
+kubectl apply -f kubernetes/deployment.yaml
+kubectl apply -f kubernetes/service.yaml
+kubectl apply -f kubernetes/hpa.yaml
+```
+
+Wait for the rollout and inspect resources:
+
+```bash
+kubectl rollout status deployment/ml-model-serving-deployment
+kubectl get pods -l app=ml-model-serving
+kubectl get service ml-model-serving-service
+kubectl get hpa ml-model-serving-hpa
+```
+
+Access the API using either method:
+
+```bash
+minikube service ml-model-serving-service --url
+```
+
+or:
+
+```bash
+kubectl port-forward service/ml-model-serving-service 8000:80
+```
+
+Then test it from another terminal:
+
+```bash
+curl http://localhost:8000/health
+curl -X POST 'http://localhost:8000/predict?top_k=5' \
+  -F 'file=@test-image.jpg;type=image/jpeg'
+```
+
+## Add Kubernetes monitoring
+
+Install a Prometheus Operator stack if one is not already present:
+
+```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
-
-helm install prometheus prometheus-community/kube-prometheus-stack \
-  --namespace monitoring --create-namespace
-
-# Access Grafana
-kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80
-
-# Login: admin / prom-operator
+helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  --create-namespace
 ```
 
-### Step 7: Cleanup
+Apply the ServiceMonitor in the same namespace as the API Service:
 
 ```bash
-kubectl delete namespace ml-serving
-helm uninstall prometheus -n monitoring
-minikube stop
-# Or: minikube delete
+kubectl apply -f kubernetes/servicemonitor.yaml
+kubectl get servicemonitor ml-model-serving-monitor
 ```
 
----
+The ServiceMonitor selects `ml-model-serving-service` by labels and scrapes its named `http` port at `/metrics` every 15 seconds. Its `release: monitoring` label must match the Prometheus installation's ServiceMonitor selector.
 
-## Option 3: Cloud Kubernetes (Production)
-
-### Step 3a: Google Kubernetes Engine (GKE)
+Access Grafana from the Helm installation:
 
 ```bash
-# Set project
-export PROJECT_ID=your-project-id
-export CLUSTER_NAME=ml-cluster
-export REGION=us-central1
-
-gcloud config set project $PROJECT_ID
-
-# Create GKE cluster
-gcloud container clusters create $CLUSTER_NAME \
-  --region=$REGION \
-  --machine-type=n1-standard-2 \
-  --num-nodes=2 \
-  --enable-autoscaling --min-nodes=1 --max-nodes=5 \
-  --enable-stackdriver-kubernetes
-
-# Get credentials
-gcloud container clusters get-credentials $CLUSTER_NAME --region=$REGION
-
-# Verify
-kubectl get nodes
+kubectl port-forward -n monitoring service/monitoring-grafana 3000:80
 ```
 
-**Build and Push Image:**
-```bash
-# Build for GCP
-docker build -t gcr.io/$PROJECT_ID/ml-api:v1 .
+## Use the image published by CI
 
-# Push to Container Registry
-docker push gcr.io/$PROJECT_ID/ml-api:v1
+Pushes to `main` build and publish images similar to:
 
-# Update deployment.yaml to use gcr.io image
+```text
+ghcr.io/wwoww4fun/ml-model-serving:main
+ghcr.io/wwoww4fun/ml-model-serving:sha-<commit>
+ghcr.io/wwoww4fun/ml-model-serving:latest
 ```
 
-**Deploy:**
-```bash
-kubectl apply -f kubernetes/ -n ml-serving
-kubectl get svc -n ml-serving  # Get external IP
-```
-
-**Cleanup:**
-```bash
-gcloud container clusters delete $CLUSTER_NAME --region=$REGION
-```
-
-### Step 3b: Amazon EKS (AWS)
+Update the Deployment before applying it to a cluster:
 
 ```bash
-# Install eksctl
-# See: https://eksctl.io/installation/
-
-# Create cluster
-eksctl create cluster \
-  --name ml-cluster \
-  --region us-east-1 \
-  --nodegroup-name standard-workers \
-  --node-type t3.medium \
-  --nodes 2 \
-  --nodes-min 1 \
-  --nodes-max 5 \
-  --managed
-
-# Get credentials (automatic with eksctl)
-kubectl get nodes
+kubectl set image deployment/ml-model-serving-deployment \
+  ml-api=ghcr.io/wwoww4fun/ml-model-serving:latest
+kubectl rollout status deployment/ml-model-serving-deployment
 ```
 
-**Build and Push Image:**
-```bash
-# Create ECR repository
-aws ecr create-repository --repository-name ml-api --region us-east-1
+For a private package, configure an image pull secret and reference it with `imagePullSecrets` in the pod specification.
 
-# Get ECR login
-aws ecr get-login-password --region us-east-1 | \
-  docker login --username AWS --password-stdin \
-  <account-id>.dkr.ecr.us-east-1.amazonaws.com
+## Enable deployment from GitHub Actions
 
-# Build and push
-docker build -t <account-id>.dkr.ecr.us-east-1.amazonaws.com/ml-api:v1 .
-docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/ml-api:v1
-```
+Automatic deployment is disabled by default. It requires a Kubernetes API endpoint reachable from a GitHub-hosted runner; a Minikube cluster on a laptop is normally not reachable.
 
-**Deploy:**
-```bash
-kubectl apply -f kubernetes/ -n ml-serving
-kubectl get svc -n ml-serving  # Get LoadBalancer DNS
-```
+In repository **Settings → Secrets and variables → Actions**:
 
-**Cleanup:**
-```bash
-eksctl delete cluster --name ml-cluster --region us-east-1
-```
+1. Add the secret `KUBECONFIG` containing a base64-encoded kubeconfig.
+2. Add the variable `ENABLE_DEPLOYMENT=true`.
+3. Ensure the kubeconfig context deploys to the `default` namespace, which the workflow currently uses.
 
-### Step 3c: Azure Kubernetes Service (AKS)
+On macOS, produce the secret value with:
 
 ```bash
-# Create resource group
-az group create --name ml-rg --location eastus
-
-# Create AKS cluster
-az aks create \
-  --resource-group ml-rg \
-  --name ml-cluster \
-  --node-count 2 \
-  --enable-addons monitoring \
-  --generate-ssh-keys
-
-# Get credentials
-az aks get-credentials --resource-group ml-rg --name ml-cluster
-kubectl get nodes
+base64 < ~/.kube/config | pbcopy
 ```
 
-**Build and Push Image:**
-```bash
-# Create ACR
-az acr create --resource-group ml-rg --name mlacr --sku Basic
+The next push to `main` will build the image, update the Deployment, wait for the rollout, call `/health`, and roll back if the rollout or smoke test fails.
 
-# Build and push
-az acr build --registry mlacr --image ml-api:v1 .
-```
+## Rollback and cleanup
 
-**Deploy:**
-```bash
-kubectl apply -f kubernetes/ -n ml-serving
-kubectl get svc -n ml-serving
-```
-
-**Cleanup:**
-```bash
-az group delete --name ml-rg --yes --no-wait
-```
-
----
-
-## Troubleshooting
-
-### Pod Not Starting
+Inspect rollout history and undo the most recent Deployment update:
 
 ```bash
-# Check pod status
-kubectl get pods -n ml-serving
-kubectl describe pod <pod-name> -n ml-serving
-
-# Common issues:
-# 1. Image pull error: Check image name and registry access
-# 2. CrashLoopBackOff: Check logs for errors
-# 3. Insufficient resources: Check node resources
+kubectl rollout history deployment/ml-model-serving-deployment
+kubectl rollout undo deployment/ml-model-serving-deployment
+kubectl rollout status deployment/ml-model-serving-deployment
 ```
 
-### Cannot Access Service
+Remove project resources:
 
 ```bash
-# Check service
-kubectl get svc -n ml-serving
-kubectl describe svc ml-api-service -n ml-serving
-
-# Check endpoints
-kubectl get endpoints -n ml-serving
-
-# For LoadBalancer, ensure cloud provider supports it
-# Or use NodePort/port-forward for testing
+kubectl delete -f kubernetes/servicemonitor.yaml --ignore-not-found
+kubectl delete -f kubernetes/hpa.yaml --ignore-not-found
+kubectl delete -f kubernetes/service.yaml --ignore-not-found
+kubectl delete -f kubernetes/deployment.yaml --ignore-not-found
+kubectl delete -f kubernetes/configmap.yaml --ignore-not-found
 ```
-
-### High Memory Usage
-
-```bash
-# Check resource usage
-kubectl top pods -n ml-serving
-
-# Adjust resource limits in deployment.yaml
-# Optimize model loading (lazy loading, model quantization)
-```
-
-### Slow Inference
-
-```bash
-# Check logs for inference time
-kubectl logs -n ml-serving deployment/ml-api | grep inference_time
-
-# Optimize:
-# 1. Use GPU instances
-# 2. Enable model caching
-# 3. Implement request batching
-# 4. Use model optimization (ONNX, TensorRT)
-```
-
----
-
-## Monitoring and Logging
-
-### View Logs
-
-```bash
-# Real-time logs
-kubectl logs -f deployment/ml-api -n ml-serving
-
-# Logs from specific pod
-kubectl logs <pod-name> -n ml-serving
-
-# Logs from previous crashed container
-kubectl logs <pod-name> -n ml-serving --previous
-```
-
-### Check Metrics
-
-```bash
-# Prometheus targets
-kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090
-# Visit: http://localhost:9090/targets
-
-# Query metrics
-# predictions_total
-# prediction_duration_seconds
-```
-
-### Access Grafana
-
-```bash
-kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80
-# Visit: http://localhost:3000
-# Import dashboard from monitoring/grafana/dashboards/
-```
-
----
-
-## CI/CD Integration
-
-### GitHub Actions (See .github/workflows/ci-cd.yaml)
-
-Automatically:
-1. Run tests on PR
-2. Build Docker image on merge to main
-3. Push to container registry
-4. Deploy to staging/production
-
-**Setup:**
-```bash
-# Add secrets to GitHub repo
-# - DOCKER_USERNAME
-# - DOCKER_PASSWORD
-# - KUBE_CONFIG (base64 encoded)
-```
-
----
-
-## Production Checklist
-
-Before deploying to production:
-
-- [ ] Resource limits configured (CPU, memory)
-- [ ] Health checks configured (liveness, readiness)
-- [ ] Monitoring and alerting setup
-- [ ] Logging aggregation configured
-- [ ] Auto-scaling rules tested
-- [ ] Disaster recovery plan documented
-- [ ] Security hardening (non-root user, network policies)
-- [ ] Cost monitoring enabled
-- [ ] Documentation updated
-- [ ] Load testing completed
-- [ ] Rollback procedure tested
-
----
-
-## Next Steps
-
-1. ✅ Deploy locally and test
-2. ✅ Deploy to Kubernetes and verify
-3. ✅ Setup monitoring and alerts
-4. ✅ Run load tests
-5. ✅ Document any issues and optimizations
-
-For questions, see [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)

@@ -1,372 +1,138 @@
-# Project 01: Basic Model Serving - Architecture Documentation
+# Architecture
 
 ## Overview
 
-This project implements a production-ready ML model serving system with REST API, containerization, Kubernetes deployment, and comprehensive monitoring.
+This project serves a pretrained ImageNet classifier through FastAPI. The application can run directly with Python, in Docker, or as replicated pods in Kubernetes. Prometheus collects application metrics, Grafana provides visualization infrastructure, and GitHub Actions validates and publishes each main-branch build.
 
-## Architecture Diagram
+## System context
 
-```
-                                                    ┌─────────────┐
-                                                    │   Grafana   │
-                                                    │  Dashboard  │
-                                                    └──────┬──────┘
-                                                           │
-                                                           │ queries
-┌──────────┐         ┌──────────────┐         ┌──────────▼──────┐
-│  Client  │────────▶│ Load Balancer│────────▶│   Prometheus    │
-│ (User)   │  HTTP   │  (Service)   │         │   Monitoring    │
-└──────────┘  Req    └──────┬───────┘         └─────────────────┘
-                             │                          │
-                             │                          │ scrapes metrics
-                             ▼                          │
-                   ┌─────────────────┐                  │
-                   │   FastAPI Pod   │◀─────────────────┘
-                   │  (ML Serving)   │
-                   │                 │
-                   │  ┌───────────┐  │
-                   │  │  ML Model │  │
-                   │  │ (ResNet18)│  │
-                   │  └───────────┘  │
-                   │                 │
-                   │  /predict       │
-                   │  /health        │
-                   │  /metrics       │
-                   └─────────────────┘
-                             │
-                             │ autoscale
-                             ▼
-                   ┌─────────────────┐
-                   │ Horizontal Pod  │
-                   │   Autoscaler    │
-                   └─────────────────┘
+```text
+Client
+  │ HTTP: /predict, /health, /metrics
+  ▼
+Kubernetes LoadBalancer Service :80
+  │
+  ├──────────────┐
+  ▼              ▼
+FastAPI Pod   FastAPI Pod       ◀── Horizontal Pod Autoscaler
+  │              │
+  └──────┬───────┘
+         │ /metrics every 15s
+         ▼
+    Prometheus ──────▶ Grafana
 ```
 
-## Components
+For local development, Docker Compose provides the same API, Prometheus, and Grafana services on one Docker network.
 
-### 1. FastAPI Application (`src/api.py`)
+## Application components
 
-**Purpose**: REST API for model inference
+### API layer
 
-**Key Features:**
-- `/health` - Health check endpoint
-- `/metrics` - Prometheus metrics
-- `/v1/predict` - Image classification endpoint
-- Async request handling
-- Input validation
-- Error handling
+[`src/api.py`](../src/api.py) owns the HTTP interface and application lifecycle.
 
-**Technology Stack:**
-- FastAPI (async web framework)
-- Pydantic (request validation)
-- Prometheus Client (metrics)
+- Loads the model before the application begins serving traffic.
+- Implements `/`, `/predict`, `/health`, and `/metrics`.
+- Validates upload type, size, and `top_k`.
+- Records request counts, duration, successful predictions, and errors.
+- Releases model and CUDA resources during shutdown.
 
-### 2. Model Wrapper (`src/model.py`)
+FastAPI stores the loaded `ModelInference` instance in `app.state.model`. Tests replace it with a deterministic fake model so API behavior can be validated without downloading model weights.
 
-**Purpose**: Load and manage ML model
+### Model layer
 
-**Responsibilities:**
-- Model loading at startup
-- Inference execution
-- Device management (CPU/GPU)
-- Preprocessing and postprocessing
+[`src/model.py`](../src/model.py) wraps torchvision models and inference behavior.
 
-**Model**: ResNet18 (pre-trained on ImageNet)
+1. Create a ResNet model and load pretrained weights.
+2. Move it to the selected CPU or CUDA device.
+3. Warm it with one dummy tensor.
+4. Decode uploads with Pillow.
+5. Resize, center-crop, and normalize the image for ImageNet.
+6. Run inference without gradient tracking.
+7. Apply softmax and return the highest-confidence classes.
 
-### 3. Configuration (`src/config.py`)
+ResNet18 is used by the application startup path. ResNet50 is also supported by the model wrapper. Pretrained weights and ImageNet labels are downloaded at runtime when they are not already available; generic class names are used if only the label download fails.
 
-**Purpose**: Centralized configuration management
+### Configuration
 
-**Configuration Sources:**
-1. Environment variables (.env)
-2. Config files
-3. Default values
+[`src/config.py`](../src/config.py) defines validated settings using Pydantic Settings. Values can come from environment variables or `.env`, with defaults suitable for local CPU execution.
 
-**Key Settings:**
-- Model path
-- Device (CPU/GPU)
-- API settings
-- Logging level
+Important settings include the environment, ports, model name, device, upload limit, logging, cache, metrics, and rate-limit feature flags. Kubernetes supplies selected values through [`kubernetes/configmap.yaml`](../kubernetes/configmap.yaml).
 
-### 4. Utilities (`src/utils.py`)
+The current API startup path uses explicit ResNet18 and CPU defaults; not every available `Settings` field is wired into runtime behavior yet.
 
-**Purpose**: Helper functions
+### Shared utilities
 
-**Functions:**
-- Image download and validation
-- Logging setup
-- Metrics helpers
-- Error handling utilities
+[`src/utils.py`](../src/utils.py) contains reusable image validation, preprocessing, logging, prediction post-processing, latency statistics, caching, error mapping, model health, and system information helpers.
 
-## Data Flow
+## Request flow
 
-### Inference Request Flow
-
-```
-1. Client sends POST /v1/predict with image
-   ↓
-2. FastAPI receives request
-   ↓
-3. Pydantic validates input
-   ↓
-4. Image downloaded/loaded
-   ↓
-5. Image preprocessed (resize, normalize)
-   ↓
-6. Model inference (forward pass)
-   ↓
-7. Postprocessing (softmax, top-k)
-   ↓
-8. Response formatted and sent
-   ↓
-9. Metrics recorded (latency, count)
+```text
+POST /predict?top_k=5
+        │
+        ▼
+Validate content type, size, and top_k
+        │
+        ▼
+Decode image → RGB → resize → center crop → normalize
+        │
+        ▼
+ResNet forward pass → softmax → top-k classes
+        │
+        ▼
+JSON response + Prometheus counters and latency
 ```
 
-### Health Check Flow
+Invalid client input returns a `4xx` response. Unexpected inference failures return `500` and increment `api_errors_total`.
 
-```
-1. Kubernetes sends GET /health
-   ↓
-2. FastAPI checks:
-   - Model loaded
-   - Service healthy
-   ↓
-3. Returns 200 OK or 503 Unavailable
-```
+## Health and availability
 
-### Metrics Collection Flow
+The `/health` endpoint returns `200` when the API has a model object and `503` otherwise.
 
-```
-1. Prometheus scrapes GET /metrics every 15s
-   ↓
-2. FastAPI returns metrics:
-   - predictions_total (counter)
-   - prediction_duration_seconds (histogram)
-   - http_requests_total (counter)
-   ↓
-3. Prometheus stores time-series data
-   ↓
-4. Grafana visualizes metrics
-```
+- Docker checks it every 30 seconds after a 40-second startup period.
+- Kubernetes readiness checks remove an unhealthy pod from Service traffic.
+- Kubernetes liveness checks restart a repeatedly unhealthy container.
+- The optional deployment workflow calls `/health` after a rollout and rolls back on failure.
 
-## Deployment Architecture
+The endpoint is intentionally lightweight; it does not run an inference for every probe.
 
-### Local Development
+## Kubernetes topology
 
-```
-docker-compose up
-├── api:8000 (ML serving)
-├── prometheus:9090 (metrics)
-└── grafana:3000 (dashboards)
-```
+The manifests use the current kubectl namespace unless the caller supplies `-n`.
 
-### Kubernetes Production
+| Resource | Name | Role |
+| --- | --- | --- |
+| Deployment | `ml-model-serving-deployment` | Runs two API replicas with rolling updates. |
+| Service | `ml-model-serving-service` | Exposes port 80 and forwards to container port 8000. |
+| ConfigMap | `ml-model-config` | Stores non-secret runtime settings. |
+| HPA | `ml-model-serving-hpa` | Scales from 2 to 10 replicas using CPU and memory. |
+| ServiceMonitor | `ml-model-serving-monitor` | Tells Prometheus Operator to scrape `/metrics`. |
 
-```
-Kubernetes Cluster
-├── Namespace: ml-serving
-├── Deployment: ml-api
-│   ├── Pod 1 (replica)
-│   ├── Pod 2 (replica)
-│   └── Pod N (auto-scaled)
-├── Service: ml-api-service (LoadBalancer)
-├── ConfigMap: ml-api-config
-├── HPA: ml-api-hpa (auto-scaling rules)
-├── Prometheus: monitoring namespace
-└── Grafana: monitoring namespace
+Each pod requests 500 millicores and 1 GiB of memory and is limited to 1 CPU and 2 GiB.
+
+## Observability
+
+Prometheus scrapes the API every 15 seconds. Grafana is provisioned with Prometheus as its default datasource. The repository currently supplies Grafana provisioning configuration but not a finished dashboard JSON file; dashboards can be created through the Grafana UI or added under `monitoring/grafana/dashboards`.
+
+The ServiceMonitor path requires Prometheus Operator, such as the one installed by `kube-prometheus-stack`. For Docker Compose, Prometheus uses the static target `api:8000`.
+
+## CI/CD flow
+
+```text
+Push or pull request
+    ▼
+Black + isort + flake8
+    ▼
+pytest on Python 3.10, 3.11, and 3.12
+    ▼
+Build, scan, and push image to GHCR
+    ▼
+Optional Kubernetes deployment
+    ▼
+Optional Slack notification
 ```
 
-## Scaling Strategy
+Kubernetes deployment and Slack notification are feature-gated with GitHub repository variables. They remain skipped unless their external services and secrets are configured.
 
-### Horizontal Pod Autoscaling (HPA)
+## Security boundaries
 
-**Metrics:**
-- Target CPU: 70%
-- Target Memory: 80%
-- Custom: requests per second
-
-**Configuration:**
-```yaml
-minReplicas: 1
-maxReplicas: 5
-scaleUp: add pod when CPU > 70% for 30s
-scaleDown: remove pod when CPU < 50% for 5min
-```
-
-**Scaling Behavior:**
-```
-Low traffic (< 10 req/sec):  1 pod
-Medium traffic (10-50 req/sec): 2-3 pods
-High traffic (> 50 req/sec): 4-5 pods
-```
-
-## Performance Characteristics
-
-### Latency
-
-| Metric | Target | Measured |
-|--------|--------|----------|
-| p50 latency | < 50ms | TODO: Measure |
-| p95 latency | < 100ms | TODO: Measure |
-| p99 latency | < 200ms | TODO: Measure |
-
-### Throughput
-
-| Metric | Target | Measured |
-|--------|--------|----------|
-| Requests/sec (single pod) | 20-50 | TODO: Measure |
-| Requests/sec (5 pods) | 100-250 | TODO: Measure |
-
-### Resource Usage
-
-| Resource | Per Pod | Notes |
-|----------|---------|-------|
-| CPU | 500m-1000m | 0.5-1 CPU core |
-| Memory | 512Mi-1Gi | Model + runtime |
-| Disk | 1Gi | Model weights |
-
-## Monitoring and Observability
-
-### Key Metrics
-
-**Application Metrics:**
-- `predictions_total` - Total predictions by status
-- `prediction_duration_seconds` - Inference latency histogram
-- `http_requests_total` - Total HTTP requests
-
-**System Metrics:**
-- CPU utilization
-- Memory usage
-- Network I/O
-- Disk I/O
-
-**Model Metrics:**
-- Prediction distribution (class counts)
-- Confidence scores (average)
-- Error rate
-
-### Logging
-
-**Log Levels:**
-- DEBUG: Detailed debugging info
-- INFO: General information
-- WARNING: Warning messages
-- ERROR: Error messages
-- CRITICAL: Critical failures
-
-**Log Format (JSON):**
-```json
-{
-  "timestamp": "2025-10-15T12:00:00Z",
-  "level": "INFO",
-  "message": "Prediction successful",
-  "request_id": "uuid-1234",
-  "inference_time_ms": 25,
-  "class": "cat",
-  "probability": 0.95
-}
-```
-
-## Security Considerations
-
-### Current Implementation
-
-- ✅ Run as non-root user in container
-- ✅ Input validation (file size, format)
-- ✅ CORS enabled (configurable)
-- ✅ Health checks for availability
-
-### TODO: Production Hardening
-
-- ⬜ API authentication (JWT, API keys)
-- ⬜ Rate limiting per user/IP
-- ⬜ HTTPS/TLS encryption
-- ⬜ Network policies in Kubernetes
-- ⬜ Secret management (for model encryption)
-- ⬜ Input sanitization (prevent adversarial attacks)
-
-## Disaster Recovery
-
-### Failure Scenarios
-
-**Pod Failure:**
-- Kubernetes automatically restarts failed pods
-- HPA maintains minimum replicas
-- Service routes traffic to healthy pods
-
-**Node Failure:**
-- Pods rescheduled to healthy nodes
-- PersistentVolumes (if used) reattached
-
-**Model Corruption:**
-- Keep multiple model versions
-- Implement model validation on load
-- Rollback to previous version
-
-### Backup Strategy
-
-**Model Artifacts:**
-- Store in S3/GCS with versioning
-- Automated backups every model update
-- Retention: 30 days
-
-**Configuration:**
-- Git repository (version controlled)
-- ConfigMaps backed up
-
-## Cost Optimization
-
-### Current Setup (Estimated Monthly Costs)
-
-**Development:**
-```
-1 pod (24/7): ~$30/month
-Prometheus: ~$10/month
-Grafana: ~$10/month
-Storage: ~$5/month
-Total: ~$55/month
-```
-
-**Production (with auto-scaling):**
-```
-Average 3 pods: ~$90/month
-Monitoring: ~$30/month
-Storage: ~$10/month
-Network: ~$20/month
-Total: ~$150/month
-```
-
-### Optimization Tips
-
-1. **Use spot instances** (60% savings)
-2. **Scale to zero** during off-hours (save 50%)
-3. **Model compression** (reduce memory, use smaller instances)
-4. **Caching** (reduce redundant inference)
-5. **Batch processing** (higher throughput per instance)
-
-## Future Enhancements
-
-### Phase 1 (Near-term)
-- [ ] Add model versioning and A/B testing
-- [ ] Implement request batching
-- [ ] Add model warm-up on startup
-- [ ] Distributed tracing with Jaeger
-
-### Phase 2 (Mid-term)
-- [ ] GPU support for faster inference
-- [ ] Model compression (quantization, pruning)
-- [ ] Multi-model serving
-- [ ] Feature store integration
-
-### Phase 3 (Long-term)
-- [ ] Automated model retraining pipeline
-- [ ] Drift detection and monitoring
-- [ ] Federated learning support
-- [ ] Edge deployment (TensorFlow Lite, ONNX)
-
-## References
-
-- [FastAPI Documentation](https://fastapi.tiangolo.com/)
-- [Kubernetes Documentation](https://kubernetes.io/docs/)
-- [Prometheus Best Practices](https://prometheus.io/docs/practices/)
-- [ML Serving Best Practices](https://cloud.google.com/architecture/mlops-continuous-delivery-and-automation-pipelines-in-machine-learning)
+The container runs as a non-root user, uploads have type and size checks, dependencies are pinned, and CI scans the built image with Trivy. The current service still needs TLS, authentication, rate limiting, restrictive CORS, network policies, and secret management before public production use.

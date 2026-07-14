@@ -1,434 +1,240 @@
-# Project 01: Basic Model Serving System
+# Basic Model Serving System
 
-**Duration:** 30 hours
-**Difficulty:** Medium
-**Prerequisites:** Completed Modules 01-04
+[![CI/CD Pipeline](https://github.com/WwOwW4fun/Model-Serving-System/actions/workflows/ci-cd.yaml/badge.svg)](https://github.com/WwOwW4fun/Model-Serving-System/actions/workflows/ci-cd.yaml)
 
-## Project Overview
+A small end-to-end machine-learning serving system that exposes a pretrained PyTorch image classifier through FastAPI. The project includes Docker packaging, Kubernetes manifests, Prometheus metrics, Grafana provisioning, automated tests, and a GitHub Actions pipeline that publishes images to GitHub Container Registry.
 
-Build a complete model serving system that deploys a pre-trained image classification model (ResNet) as a REST API. The system will be containerized with Docker, deployed on Kubernetes, monitored with Prometheus and Grafana, and deployed automatically via CI/CD pipeline.
+## Features
 
-This project demonstrates fundamental skills in:
-- Model serving and inference
-- Containerization with Docker
-- Kubernetes orchestration
-- Monitoring and observability
-- CI/CD for ML systems
+- ImageNet classification with pretrained ResNet18
+- Top-k prediction responses with confidence scores
+- FastAPI OpenAPI, Swagger UI, and ReDoc
+- Health, readiness, liveness, and Docker health checks
+- Prometheus request, latency, prediction, and error metrics
+- Multi-stage Docker image running as a non-root user
+- Replicated Kubernetes Deployment, LoadBalancer Service, ConfigMap, and HPA
+- Prometheus Operator ServiceMonitor
+- Tests across Python 3.10, 3.11, and 3.12
+- GitHub Actions linting, testing, image scanning, and GHCR publishing
+- Optional Kubernetes deployment and Slack notifications
 
-## Learning Objectives
+## Architecture
 
-By completing this project, you will be able to:
-
-1. **Deploy ML Model as REST API** - Serve a PyTorch model via FastAPI
-2. **Containerize ML Application** - Create optimized Docker images for ML services
-3. **Deploy on Kubernetes** - Manage deployments, services, and resources
-4. **Implement Monitoring** - Track custom metrics with Prometheus and visualize with Grafana
-5. **Build CI/CD Pipeline** - Automate testing and deployment with GitHub Actions
-6. **Document Infrastructure** - Create comprehensive documentation for your system
-
-## System Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     User/Client                             │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-                         ↓
-┌─────────────────────────────────────────────────────────────┐
-│                 Kubernetes Cluster                          │
-│  ┌────────────────────────────────────────────────────┐    │
-│  │  LoadBalancer/Service (Port 8080)                  │    │
-│  └─────────────────────┬──────────────────────────────┘    │
-│                        │                                     │
-│     ┌──────────────────┼──────────────────┐                │
-│     │                  │                  │                 │
-│     ↓                  ↓                  ↓                 │
-│  ┌─────┐           ┌─────┐           ┌─────┐              │
-│  │ Pod │           │ Pod │           │ Pod │               │
-│  │ #1  │           │ #2  │           │ #3  │               │
-│  │     │           │     │           │     │               │
-│  │FastAPI          │FastAPI          │FastAPI              │
-│  │+Model           │+Model           │+Model               │
-│  └─────┘           └─────┘           └─────┘              │
-│     │                  │                  │                 │
-│     └──────────────────┼──────────────────┘                │
-│                        │                                     │
-│                        ↓                                     │
-│            ┌───────────────────────┐                        │
-│            │ ConfigMap (settings)  │                        │
-│            └───────────────────────┘                        │
-└──────────────────────┬────────────────────────────────────┘
-                       │
-                       ↓ (metrics scraping)
-┌─────────────────────────────────────────────────────────────┐
-│              Monitoring Stack                               │
-│  ┌─────────────────┐         ┌─────────────────┐           │
-│  │   Prometheus    │ ──────> │    Grafana      │           │
-│  │  (Metrics DB)   │         │  (Dashboards)   │           │
-│  └─────────────────┘         └─────────────────┘           │
-└─────────────────────────────────────────────────────────────┘
+```text
+Client
+  │ HTTP
+  ▼
+LoadBalancer Service :80
+  │
+  ├──────────────┐
+  ▼              ▼
+FastAPI Pod   FastAPI Pod       ◀── Horizontal Pod Autoscaler
+  │              │
+  └──────┬───────┘
+         │ /metrics
+         ▼
+    Prometheus ──────▶ Grafana
 ```
 
-## Functional Requirements
+Each API process loads the model into memory during startup. Prediction requests are decoded, resized, normalized, passed through ResNet, and returned as ranked ImageNet classes. See [Architecture](docs/ARCHITECTURE.md) for component and request-flow details.
 
-### Must Have (Required)
+## Technology stack
 
-#### FR-1: REST API for Image Classification
-- **POST /predict** endpoint accepting image upload or URL
-- Returns top-5 predictions with confidence scores
-- API response time <100ms for small images (<1MB)
-- Proper error handling for invalid inputs
-- API documentation available at **/docs** (FastAPI auto-generates)
+| Area | Technology |
+| --- | --- |
+| API | Python, FastAPI, Uvicorn, Pydantic |
+| ML | PyTorch, torchvision, Pillow |
+| Packaging | Docker, Docker Compose |
+| Orchestration | Kubernetes, Horizontal Pod Autoscaler |
+| Monitoring | Prometheus, Grafana |
+| Automation | GitHub Actions, GHCR, Trivy |
+| Testing | pytest, pytest-cov |
 
-#### FR-2: Containerization
-- Dockerfile with multi-stage builds
-- Image size <2GB
-- Container runs as non-root user
-- Environment variables for configuration
-- Health check endpoint at **/health**
+## Quick start
 
-#### FR-3: Kubernetes Deployment
-- Deployment manifest with resource requests/limits
-- Service exposing the API (LoadBalancer or NodePort)
-- ConfigMap for application configuration
-- Liveness and readiness probes configured
-- Zero-downtime updates supported
+### Run with Python
 
-#### FR-4: Monitoring
-- Prometheus scraping application metrics
-- Custom metrics: **request_count**, **request_duration**, **prediction_count**
-- Grafana dashboard showing 5-7 key metrics
-- Alert configured for service downtime
-- Metrics retained for 7+ days
-
-#### FR-5: CI/CD Pipeline
-- Pipeline runs on every commit to main branch
-- Automated linting and testing
-- Docker image built and pushed to registry
-- Automated deployment to Kubernetes (optional for learning environment)
-- Pipeline completes in <10 minutes
-
-### Should Have (Recommended)
-
-#### FR-6: Performance
-- API latency p95 <100ms
-- Handle 10+ concurrent requests
-- Model loaded in memory (no cold start delays)
-- CPU utilization <70% under normal load
-
-## Technical Stack
-
-### Required Technologies
-
-- **Python 3.9+** - Application language
-- **PyTorch** - ML framework
-- **FastAPI** - Web framework for API
-- **Uvicorn** - ASGI server
-- **Docker** - Containerization
-- **Kubernetes** - Orchestration (minikube or cloud)
-- **Prometheus** - Metrics collection
-- **Grafana** - Visualization
-- **GitHub Actions** - CI/CD
-
-### Optional Technologies
-
-- **TorchServe** - Alternative to custom FastAPI serving
-- **Nginx** - Reverse proxy
-- **Redis** - Caching layer
-- **Locust** - Load testing
-
-## Project Structure
-
-```
-project-101-basic-model-serving/
-├── README.md                       # This file
-├── REQUIREMENTS.md                 # Detailed requirements
-├── ARCHITECTURE.md                 # Architecture documentation
-├── MILESTONES.md                   # Implementation milestones
-│
-├── src/
-│   ├── __init__.py
-│   ├── api.py                      # FastAPI application (CODE STUB)
-│   ├── model.py                    # Model loading and inference (CODE STUB)
-│   ├── utils.py                    # Utility functions (CODE STUB)
-│   └── config.py                   # Configuration management (CODE STUB)
-│
-├── tests/
-│   ├── __init__.py
-│   ├── test_api.py                 # API tests (TEST STUBS)
-│   └── test_model.py               # Model tests (TEST STUBS)
-│
-├── kubernetes/
-│   ├── deployment.yaml             # K8s deployment (TEMPLATE)
-│   ├── service.yaml                # K8s service (TEMPLATE)
-│   ├── configmap.yaml              # Configuration (TEMPLATE)
-│   └── hpa.yaml                    # Horizontal Pod Autoscaler (optional)
-│
-├── monitoring/
-│   ├── prometheus.yml              # Prometheus config
-│   └── grafana-dashboard.json      # Grafana dashboard template
-│
-├── docs/
-│   ├── API.md                      # API documentation template
-│   ├── DEPLOYMENT.md               # Deployment guide template
-│   └── TROUBLESHOOTING.md          # Troubleshooting guide template
-│
-├── .github/
-│   └── workflows/
-│       └── ci-cd.yml               # CI/CD pipeline (TEMPLATE)
-│
-├── requirements.txt                # Python dependencies
-├── requirements-dev.txt            # Development dependencies
-├── Dockerfile                      # Docker build instructions (TEMPLATE)
-├── docker-compose.yml              # Local development setup
-├── .env.example                    # Environment variables template
-├── .gitignore                      # Git ignore rules
-└── pytest.ini                      # Pytest configuration
-```
-
-## Implementation Milestones
-
-### Milestone 1: Working FastAPI Application (6 hours)
-**Goal:** Model serving locally with REST API
-
-**Tasks:**
-- Implement model loading in `model.py`
-- Create FastAPI application in `api.py`
-- Implement `/predict`, `/health`, `/metrics` endpoints
-- Test locally with sample images
-- Validate response format
-
-**Deliverable:** Working API on `localhost:8000`
-
-### Milestone 2: Docker Container (4 hours)
-**Goal:** Containerized application
-
-**Tasks:**
-- Write Dockerfile with multi-stage build
-- Optimize image size (<2GB)
-- Configure non-root user
-- Add health check
-- Test container locally
-
-**Deliverable:** Docker image running successfully
-
-### Milestone 3: Kubernetes Deployment (6 hours)
-**Goal:** Service running on Kubernetes
-
-**Tasks:**
-- Write deployment.yaml
-- Write service.yaml
-- Create configmap.yaml
-- Deploy to minikube
-- Verify accessibility
-
-**Deliverable:** Service accessible via K8s
-
-### Milestone 4: Monitoring (6 hours)
-**Goal:** Prometheus and Grafana operational
-
-**Tasks:**
-- Install Prometheus and Grafana on K8s
-- Configure Prometheus scraping
-- Implement custom metrics in application
-- Create Grafana dashboard
-- Set up basic alert
-
-**Deliverable:** Dashboard showing metrics
-
-### Milestone 5: CI/CD Pipeline (4 hours)
-**Goal:** Automated testing and deployment
-
-**Tasks:**
-- Write GitHub Actions workflow
-- Implement linting and testing
-- Configure Docker build and push
-- Add deployment step (optional)
-- Test pipeline end-to-end
-
-**Deliverable:** Working CI/CD pipeline
-
-### Milestone 6: Documentation (4 hours)
-**Goal:** Complete documentation
-
-**Tasks:**
-- Write API documentation
-- Create deployment guide
-- Add troubleshooting guide
-- Update README with architecture diagram
-- Add code comments
-
-**Deliverable:** Comprehensive documentation
-
-## Getting Started
-
-### Step 1: Set Up Project
+Create a virtual environment and install the pinned dependencies:
 
 ```bash
-# Create project directory
-mkdir -p project-101-basic-model-serving
-cd project-101-basic-model-serving
-
-# Copy starter code from this repository
-# Or create structure manually
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
+python3 -m venv venv
+source venv/bin/activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
-pip install -r requirements-dev.txt
 ```
 
-### Step 2: Understand the Code Stubs
-
-Review the code stubs in `src/` directory. Each file has:
-- **Complete function signatures**
-- **TODO comments** explaining what to implement
-- **Hints and examples** for implementation
-- **Type hints** for clarity
-
-### Step 3: Start with Milestone 1
-
-Follow the milestones in order. Each milestone builds on the previous one.
-
-### Step 4: Test As You Go
-
-Run tests after each component:
+Start the API:
 
 ```bash
-# Test API
-pytest tests/test_api.py
-
-# Test model
-pytest tests/test_model.py
-
-# Run all tests
-pytest
-
-# Check coverage
-pytest --cov=src
+python -m uvicorn src.api:app --host 0.0.0.0 --port 8000
 ```
 
-### Step 5: Document Your Work
+The first real-model startup may download pretrained ResNet weights and ImageNet labels.
 
-Keep your documentation updated as you progress.
+Verify the service:
 
-## Assessment Rubric
+```bash
+curl http://localhost:8000/health
+```
 
-Your project will be assessed on:
+### Run with Docker
 
-| Category | Weight | Criteria |
-|----------|--------|----------|
-| **Functionality** | 40% | API works correctly with various inputs<br>Kubernetes deployment stable<br>Monitoring operational<br>CI/CD working<br>All acceptance criteria met |
-| **Code Quality** | 25% | Clean, well-organized code<br>PEP 8 compliance<br>Proper error handling<br>Externalized configuration<br>Docker/K8s best practices |
-| **Documentation** | 20% | Comprehensive README<br>Architecture diagram<br>Clear deployment instructions<br>API documentation<br>Troubleshooting guide |
-| **Testing** | 10% | Unit tests (70%+ coverage)<br>Integration tests<br>All tests passing |
-| **Innovation** | 5% | Creative solutions<br>Performance optimizations<br>Additional features |
+Start Docker Desktop or another Docker engine, then run:
 
-**Passing Score:** 70/100
+```bash
+docker build -t ml-model-serving:v1.0 .
+docker run --rm -p 8000:8000 ml-model-serving:v1.0
+```
 
-## Success Metrics
+### Run the local monitoring stack
 
-Your project is successful when:
+Docker Compose starts the API, Prometheus, and Grafana:
 
-- ✅ API response time p95 <100ms
-- ✅ 99%+ uptime over 7 days of running
-- ✅ Monitoring dashboard showing all key metrics
-- ✅ Load test passing with 20+ concurrent users
-- ✅ Complete documentation allowing others to deploy
-- ✅ CI/CD pipeline deploying successfully
+```bash
+docker compose up --build -d
+docker compose ps
+```
 
-## Common Pitfalls
+| Service | URL |
+| --- | --- |
+| API | <http://localhost:8000> |
+| Swagger UI | <http://localhost:8000/docs> |
+| Prometheus | <http://localhost:9090> |
+| Grafana | <http://localhost:3000> |
 
-1. **Docker image too large** - Use multi-stage builds, slim base images
-2. **Model not loaded in memory** - Leads to slow inference
-3. **Missing health checks** - Causes deployment issues
-4. **Hardcoded configuration** - Use ConfigMap and environment variables
-5. **Not testing container locally** - Test with Docker before K8s
-6. **Insufficient resource limits** - Can cause OOM kills
+Grafana uses `admin` / `admin` by default for local development. Override `GRAFANA_PASSWORD` before sharing the environment.
 
-## Optimization Tips
+## Make a prediction
 
-1. Use slim Python base image (`python:3.11-slim`)
-2. Cache pip dependencies in Docker layer
-3. Pre-load model at application startup
-4. Use async FastAPI endpoints for better concurrency
-5. Implement request batching if needed
-6. Add caching for repeated predictions
+Upload a JPEG or PNG smaller than 10 MiB. `top_k` accepts values from 1 to 10 and defaults to 5.
 
-## Extensions for Advanced Learners
+```bash
+curl -X POST 'http://localhost:8000/predict?top_k=5' \
+  -F 'file=@cat.jpg;type=image/jpeg'
+```
 
-Once you complete the core requirements, try:
+Example response:
 
-1. **Request Batching** - Batch multiple inference requests for throughput
-2. **Redis Caching** - Cache common predictions
-3. **A/B Testing** - Deploy two model versions simultaneously
-4. **API Authentication** - Add API key validation
-5. **Helm Chart** - Package for easier deployment
-6. **Horizontal Pod Autoscaling** - Auto-scale based on load
-7. **Distributed Tracing** - Add Jaeger for request tracing
-8. **Image Optimization** - Reduce Docker image to <1GB
+```json
+{
+  "predictions": [
+    {
+      "class_id": 281,
+      "class_name": "tabby",
+      "confidence": 0.7431
+    }
+  ],
+  "inference_time_ms": 42.7,
+  "model_version": "1.0.0"
+}
+```
 
-## Real-World Relevance
+See the [API reference](docs/API.md) for all endpoints, response fields, and status codes.
 
-This project mirrors production ML serving systems at companies like:
-- **Airbnb** - Serving recommendation models
-- **Netflix** - Personalization APIs
-- **Uber** - Pricing and ETA prediction
+## Testing
 
-The architecture pattern (API + K8s + monitoring + CI/CD) is industry standard.
+Run the full suite:
 
-## Interview Talking Points
+```bash
+./venv/bin/pytest
+```
 
-Be prepared to discuss:
-- Design decisions for API framework choice (FastAPI vs Flask vs TorchServe)
-- Trade-offs in model serving approaches (in-memory vs external service)
-- How you handle scaling and resource management in Kubernetes
-- Monitoring strategy and key metrics tracked
-- CI/CD pipeline design and testing strategy
-- How you would debug a production issue using monitoring tools
+Run the same quality checks used by CI:
 
-## Help and Resources
+```bash
+./venv/bin/isort --check-only src tests
+./venv/bin/black --check src tests
+./venv/bin/flake8 src tests --max-line-length=100
+./venv/bin/pytest
+```
 
-### Documentation
-- [FastAPI Documentation](https://fastapi.tiangolo.com/)
-- [PyTorch Documentation](https://pytorch.org/docs/)
-- [Kubernetes Documentation](https://kubernetes.io/docs/)
-- [Prometheus Documentation](https://prometheus.io/docs/)
+The current suite covers the API, configuration, model pipeline, image utilities, cache behavior, health checks, and error handling. Expensive model downloads are replaced with deterministic test doubles.
 
-### Tutorials
-- [FastAPI Tutorial](https://fastapi.tiangolo.com/tutorial/)
-- [Kubernetes Basics](https://kubernetes.io/docs/tutorials/kubernetes-basics/)
-- [Docker Best Practices](https://docs.docker.com/develop/dev-best-practices/)
+## Kubernetes
 
-### Getting Help
-- Post questions in GitHub Discussions
-- Check TROUBLESHOOTING.md for common issues
-- Review solution repository (after attempting yourself)
+The Kubernetes manifests create:
 
-## Submission
+- Two API replicas with rolling updates
+- A LoadBalancer Service on port 80
+- Readiness and liveness probes on `/health`
+- CPU and memory requests and limits
+- An HPA that scales from 2 to 10 replicas
+- A ServiceMonitor for Prometheus Operator
 
-When complete, submit:
+For a local Minikube deployment:
 
-1. **GitHub Repository** - All code and documentation
-2. **Demo Video** (5-10 minutes) - Show your system working
-3. **Architecture Diagram** - Visual representation of your system
-4. **README** - Comprehensive documentation
-5. **Reflection** (1-2 pages) - What you learned, challenges faced, how you solved them
+```bash
+minikube start --cpus=4 --memory=6144
+minikube addons enable metrics-server
 
-## Next Steps
+docker build -t ml-model-serving:v1.0 .
+minikube image load ml-model-serving:v1.0
 
-After completing this project:
+kubectl apply -f kubernetes/configmap.yaml
+kubectl apply -f kubernetes/deployment.yaml
+kubectl apply -f kubernetes/service.yaml
+kubectl apply -f kubernetes/hpa.yaml
 
-1. **Review and Refactor** - Improve code quality
-2. **Extend** - Try advanced features
-3. **Share** - Add to your LinkedIn/resume
-4. **Move to Project 02** - Build an end-to-end MLOps pipeline
+kubectl rollout status deployment/ml-model-serving-deployment
+minikube service ml-model-serving-service --url
+```
 
----
+See the [Deployment guide](docs/DEPLOYMENT.md) for Docker Compose, monitoring, GHCR, automated deployment, rollback, and cleanup instructions.
 
-**Ready to start?** Head to `REQUIREMENTS.md` for detailed functional requirements, then review the code stubs in `src/` to begin implementation!
+## CI/CD
 
-**Good luck!** 🚀
+The workflow in [`.github/workflows/ci-cd.yaml`](.github/workflows/ci-cd.yaml) runs this sequence:
+
+```text
+Code quality → Test matrix → Build and scan image → Push to GHCR
+                                                    ├─ Optional Kubernetes deploy
+                                                    └─ Optional Slack notification
+```
+
+Kubernetes deployment and Slack notifications remain disabled unless their repository variables and secrets are configured. The required validation, testing, Docker build, security scan, and registry publishing stages run independently on GitHub-hosted runners.
+
+Published images use tags such as:
+
+```text
+ghcr.io/wwoww4fun/ml-model-serving:main
+ghcr.io/wwoww4fun/ml-model-serving:sha-<commit>
+ghcr.io/wwoww4fun/ml-model-serving:latest
+```
+
+## Project structure
+
+```text
+.
+├── .github/workflows/ci-cd.yaml  # CI/CD pipeline
+├── docs/                         # Project documentation
+├── kubernetes/                   # Deployment, Service, ConfigMap, HPA, monitor
+├── monitoring/                   # Prometheus and Grafana provisioning
+├── src/
+│   ├── api.py                    # FastAPI routes and metrics
+│   ├── config.py                 # Validated application settings
+│   ├── model.py                  # Model loading and inference
+│   └── utils.py                  # Shared serving utilities
+├── tests/                        # API, model, configuration, and utility tests
+├── Dockerfile
+├── docker-compose.yml
+├── pytest.ini
+└── requirements.txt
+```
+
+## Documentation
+
+- [API reference](docs/API.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Deployment guide](docs/DEPLOYMENT.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+
+## Current limitations
+
+- The public API has no authentication, authorization, or TLS termination.
+- Runtime startup may require internet access for model weights and labels.
+- Only single-image JPEG and PNG requests are supported.
+- The Grafana datasource and dashboard provider are provisioned, but a finished dashboard JSON is not included yet.
+- Automated Kubernetes deployment requires a remotely reachable cluster; laptop Minikube is not reachable from GitHub-hosted runners.
+- Performance and availability targets have not been validated under sustained production load.
+
+This repository is intended as a practical model-serving reference and learning project. Additional production hardening should be completed before exposing it to untrusted traffic.

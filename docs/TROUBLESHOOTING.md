@@ -1,447 +1,272 @@
-# Troubleshooting Guide - ML Model Serving
+# Troubleshooting
 
-## Common Issues and Solutions
+Start with the smallest failing layer: application, container, Kubernetes, monitoring, then CI/CD. Capture the exact command and final error lines before changing configuration.
 
-### 1. Docker Build Issues
+## Quick diagnostics
 
-#### Issue: "Docker build fails with 'no space left on device'"
+Local application:
 
-**Symptoms:**
-```
-ERROR: failed to solve: write /var/lib/docker/...: no space left on device
-```
-
-**Solution:**
 ```bash
-# Clean up Docker
-docker system prune -a --volumes
+curl -i http://localhost:8000/health
+curl -i http://localhost:8000/metrics
+```
+
+Docker:
+
+```bash
+docker compose ps
+docker compose logs --tail=200 api
+docker inspect --format '{{json .State.Health}}' ml-api
+```
+
+Kubernetes:
+
+```bash
+kubectl get deployment,pods,service,hpa
+kubectl describe deployment ml-model-serving-deployment
+kubectl get events --sort-by=.lastTimestamp
+kubectl logs deployment/ml-model-serving-deployment --tail=200
+```
+
+## Docker daemon is unavailable
+
+Example:
+
+```text
+failed to connect to the docker API ... docker.sock ... no such file or directory
+```
+
+Docker Desktop is not running or the CLI is using the wrong context. Start Docker Desktop and wait for its engine to become ready:
+
+```bash
+docker context ls
+docker context use desktop-linux
+docker info
+```
+
+Docker Desktop is required only for local Docker commands. GitHub Actions uses its own Docker engine.
+
+## Docker build is slow or fails
+
+The image contains PyTorch and torchvision, so the first build downloads large wheels. Later builds should reuse cached layers.
+
+```bash
+docker build --progress=plain -t ml-model-serving:v1.0 .
+docker system df
+```
+
+If disk space is exhausted, inspect usage before deleting caches:
+
+```bash
+docker system df
 docker builder prune
-
-# Check disk space
-df -h
 ```
 
-#### Issue: "Image build is very slow"
+Use `docker system prune` carefully because it removes unused Docker resources.
 
-**Symptoms:** Build takes 10+ minutes
+## Application does not start
 
-**Solutions:**
-1. Order Dockerfile layers by change frequency
-2. Use .dockerignore to exclude unnecessary files
-3. Use multi-stage builds
-4. Enable BuildKit:
-   ```bash
-   export DOCKER_BUILDKIT=1
-   docker build -t ml-api:v1 .
-   ```
+View the foreground logs:
 
----
-
-### 2. Container Runtime Issues
-
-#### Issue: "Container exits immediately"
-
-**Symptoms:**
 ```bash
-docker run ml-api:v1
-# Container exits with code 1
+python -m uvicorn src.api:app --host 0.0.0.0 --port 8000
 ```
 
-**Debugging:**
+For a container:
+
 ```bash
-# Check logs
-docker logs <container-id>
-
-# Run interactively
-docker run -it ml-api:v1 /bin/bash
-
-# Check if model file exists
-docker run ml-api:v1 ls -la /app/models/
+docker logs ml-model-serving
 ```
 
-**Common causes:**
-- Model file not found
-- Permission issues
-- Missing dependencies
+Common causes:
 
-#### Issue: "Model not loading"
+- No network access for the initial pretrained-weight download.
+- Insufficient memory while importing PyTorch or loading ResNet.
+- Port 8000 is already in use.
+- A dependency version does not match `requirements.txt`.
 
-**Symptoms:**
-```
-ERROR: Failed to load model from /app/models/resnet18.pth
-FileNotFoundError: [Errno 2] No such file or directory
-```
+Check port usage on macOS or Linux:
 
-**Solution:**
 ```bash
-# Ensure model file exists
-ls -la models/
-
-# Check volume mount
-docker run -v $(pwd)/models:/app/models ml-api:v1 ls /app/models/
-
-# Download model if missing
-# TODO: Add model download script
+lsof -i :8000
 ```
 
----
+Run on a different host port without changing the container:
 
-### 3. Kubernetes Deployment Issues
-
-#### Issue: "Pod stuck in Pending state"
-
-**Symptoms:**
 ```bash
-kubectl get pods -n ml-serving
-NAME                      READY   STATUS    RESTARTS   AGE
-ml-api-xxxxxxxxx-xxxxx   0/1     Pending   0          5m
+docker run --rm -p 8080:8000 ml-model-serving:v1.0
 ```
 
-**Debugging:**
-```bash
-kubectl describe pod ml-api-xxxxxxxxx-xxxxx -n ml-serving
+## `/health` returns 503
 
-# Common reasons:
-# 1. Insufficient resources
-# 2. Image pull issues
-# 3. Volume mount issues
+A `503` response means `app.state.model` is not loaded. Review startup logs for the original model-loading error.
+
+```bash
+curl -i http://localhost:8000/health
+docker logs ml-model-serving
+kubectl logs deployment/ml-model-serving-deployment
 ```
 
-**Solutions:**
+The model is loaded during FastAPI startup. Repeated restarts usually indicate failed weight downloads, memory pressure, or another exception in the startup lifecycle.
+
+## Prediction request fails
+
+Use a JPEG or PNG under 10 MiB and pass `top_k` as a query parameter:
+
 ```bash
-# Check node resources
+curl -v -X POST 'http://localhost:8000/predict?top_k=5' \
+  -F 'file=@image.jpg;type=image/jpeg'
+```
+
+| Response | Likely cause |
+| --- | --- |
+| `400` | Invalid bytes, unsupported content type, or invalid `top_k`. |
+| `413` | Image exceeds 10 MiB. |
+| `422` | Multipart `file` field is missing or malformed. |
+| `500` | Model inference failed; inspect application logs. |
+
+Do not send `top_k` as a multipart form field; the current endpoint expects `?top_k=N` in the URL.
+
+## Labels appear as `class_123`
+
+The model downloads ImageNet labels during initialization. If that request fails, it intentionally falls back to `class_0` through `class_999`. Predictions still work, but names are generic.
+
+Allow access to the label source or package a local labels file and update the model loader to use it.
+
+## Pod is Pending
+
+Inspect scheduling events:
+
+```bash
+kubectl describe pod -l app=ml-model-serving
 kubectl top nodes
-
-# Check events
-kubectl get events -n ml-serving --sort-by='.lastTimestamp'
-
-# Reduce resource requests in deployment.yaml if needed
+kubectl get events --sort-by=.lastTimestamp
 ```
 
-#### Issue: "ImagePullBackOff error"
+Each pod requests 500 millicores and 1 GiB of memory, and the Deployment starts with two replicas. A small Minikube cluster may not have enough allocatable memory. Increase cluster resources or reduce requests for local testing.
 
-**Symptoms:**
-```
-Events:
-  Warning  Failed     5m    kubelet  Failed to pull image "ml-api:v1"
-  Warning  BackOff    2m    kubelet  Back-off pulling image "ml-api:v1"
-```
+## `ImagePullBackOff` or `ErrImagePull`
 
-**Solutions:**
+The default Deployment refers to the local image `ml-model-serving:v1.0` with `IfNotPresent`.
+
+For Minikube:
+
 ```bash
-# For local Kubernetes (minikube/kind):
-minikube image load ml-api:v1
-# or
-kind load docker-image ml-api:v1
-
-# For cloud Kubernetes:
-# Push image to container registry (GCR, ECR, ACR)
-docker push gcr.io/project/ml-api:v1
-
-# Update deployment.yaml with full image path
-image: gcr.io/project/ml-api:v1
+docker build -t ml-model-serving:v1.0 .
+minikube image load ml-model-serving:v1.0
+kubectl rollout restart deployment/ml-model-serving-deployment
 ```
 
-#### Issue: "CrashLoopBackOff"
+For a registry image, use its full reference:
 
-**Symptoms:**
-```
-NAME                      READY   STATUS             RESTARTS   AGE
-ml-api-xxxxxxxxx-xxxxx   0/1     CrashLoopBackOff   5          5m
-```
-
-**Debugging:**
 ```bash
-# Check logs
-kubectl logs ml-api-xxxxxxxxx-xxxxx -n ml-serving
-
-# Check previous container logs
-kubectl logs ml-api-xxxxxxxxx-xxxxx -n ml-serving --previous
-
-# Common causes:
-# - Application crashes on startup
-# - Health check failing
-# - Out of memory (OOM)
+kubectl set image deployment/ml-model-serving-deployment \
+  ml-api=ghcr.io/wwoww4fun/ml-model-serving:latest
 ```
 
-**Solutions:**
+Private GHCR images also require a Kubernetes image pull secret.
+
+## `CrashLoopBackOff` or failing probes
+
+Inspect the current and previous container logs:
+
 ```bash
-# If OOM, increase memory limit
-resources:
-  limits:
-    memory: "2Gi"  # Increase from 1Gi
-
-# If health check failing, adjust timing
-livenessProbe:
-  initialDelaySeconds: 60  # Increase if model loading is slow
-  periodSeconds: 30
-  timeoutSeconds: 10
+kubectl logs deployment/ml-model-serving-deployment --tail=200
+kubectl logs <pod-name> --previous
+kubectl describe pod <pod-name>
 ```
 
----
+Readiness starts after 30 seconds and liveness starts after 60 seconds. A slow first-time model download can exceed these windows. Confirm startup time before increasing probe delays. If the container is `OOMKilled`, increase available memory or reduce replica/resource requirements.
 
-### 4. API Issues
+## LoadBalancer external IP remains pending
 
-#### Issue: "API returns 503 Service Unavailable"
+Local clusters normally do not provision cloud load balancers. Use Minikube's service helper or port forwarding:
 
-**Symptoms:**
 ```bash
-curl http://localhost:8000/health
-{"detail": "Service unavailable"}
+minikube service ml-model-serving-service --url
 ```
 
-**Causes:**
-- Model not loaded
-- Application not started
-- Health check failing
+or:
 
-**Solutions:**
 ```bash
-# Check logs
-docker logs <container-id>
-# or
-kubectl logs deployment/ml-api -n ml-serving
-
-# Verify model file exists
-# Increase startup timeout
-# Check resource availability (memory, CPU)
+kubectl port-forward service/ml-model-serving-service 8000:80
 ```
 
-#### Issue: "Slow inference (>1 second)"
+## HPA shows unknown metrics
 
-**Symptoms:**
-- Prediction takes multiple seconds
-- Timeouts
+The HPA depends on Kubernetes Metrics Server and resource requests.
 
-**Debugging:**
-```python
-# Add timing in code
-import time
-start = time.time()
-result = model(input)
-print(f"Inference time: {time.time() - start:.3f}s")
-```
-
-**Solutions:**
-1. **Use GPU:** Add GPU support to container
-2. **Model optimization:** Use ONNX, TensorRT, or quantization
-3. **Batch inference:** Process multiple images together
-4. **Model caching:** Ensure model is pre-loaded (not loading per request)
-5. **Reduce image size:** Downsample input images
-
-**CPU vs GPU comparison:**
-```
-CPU inference: 100-500ms
-GPU inference: 5-50ms (10-100x faster)
-```
-
-#### Issue: "Out of Memory (OOM) during inference"
-
-**Symptoms:**
-```
-torch.cuda.OutOfMemoryError: CUDA out of memory
-```
-
-**Solutions:**
-```python
-# 1. Reduce batch size
-batch_size = 1  # or smaller
-
-# 2. Use model with smaller memory footprint
-model = models.resnet18(pretrained=True)  # instead of resnet152
-
-# 3. Clear GPU cache
-import torch
-torch.cuda.empty_cache()
-
-# 4. Use CPU instead of GPU for small workloads
-device = torch.device("cpu")
-```
-
----
-
-### 5. Monitoring Issues
-
-#### Issue: "Prometheus not scraping metrics"
-
-**Symptoms:**
-- Metrics not appearing in Prometheus
-- Targets show as "Down"
-
-**Debugging:**
 ```bash
-# Check Prometheus targets
-kubectl port-forward -n monitoring svc/prometheus 9090:9090
-# Visit: http://localhost:9090/targets
+minikube addons enable metrics-server
+kubectl top pods
+kubectl describe hpa ml-model-serving-hpa
+```
 
-# Check if metrics endpoint is accessible
+Wait several collection intervals after pod startup. If `kubectl top pods` fails, repair Metrics Server before debugging the HPA.
+
+## Prometheus target is down
+
+Confirm the application exports metrics:
+
+```bash
+kubectl port-forward service/ml-model-serving-service 8000:80
 curl http://localhost:8000/metrics
 ```
 
-**Solutions:**
-```bash
-# 1. Verify Prometheus configuration
-kubectl get configmap prometheus-config -n monitoring -o yaml
-
-# 2. Check service discovery
-kubectl get servicemonitor -n ml-serving
-
-# 3. Verify network connectivity
-kubectl run -it --rm debug --image=curlimages/curl --restart=Never -- \
-  curl http://ml-api-service.ml-serving.svc.cluster.local:80/metrics
-```
-
-#### Issue: "Grafana dashboard shows no data"
-
-**Solutions:**
-```bash
-# 1. Check Prometheus datasource
-# Grafana → Configuration → Data Sources → Prometheus
-
-# 2. Verify metrics exist in Prometheus
-# Query: predictions_total
-
-# 3. Check time range (last 5 minutes)
-
-# 4. Verify dashboard queries match metric names
-```
-
----
-
-### 6. Performance Issues
-
-#### Issue: "High latency (p99 > 500ms)"
-
-**Profiling:**
-```python
-import cProfile
-import pstats
-
-profiler = cProfile.Profile()
-profiler.enable()
-
-# Your inference code
-result = model(input)
-
-profiler.disable()
-stats = pstats.Stats(profiler)
-stats.sort_stats('cumtime')
-stats.print_stats(10)  # Top 10 functions
-```
-
-**Common bottlenecks:**
-1. **Image preprocessing:** 20-50ms
-   - Solution: Optimize resize/normalize operations
-2. **Model inference:** 50-200ms (CPU), 5-50ms (GPU)
-   - Solution: Use GPU, model optimization
-3. **Postprocessing:** 5-10ms
-   - Solution: Vectorize operations
-
-#### Issue: "Low throughput (<10 req/sec)"
-
-**Solutions:**
-1. **Horizontal scaling:** Add more pods
-2. **Async processing:** Use FastAPI async
-3. **Request batching:** Process multiple requests together
-4. **Connection pooling:** Reuse connections
-5. **Caching:** Cache common predictions
-
----
-
-### 7. Scaling Issues
-
-#### Issue: "HPA not scaling up"
-
-**Symptoms:**
-- CPU/Memory above target but no new pods created
-
-**Debugging:**
-```bash
-# Check HPA status
-kubectl get hpa -n ml-serving
-kubectl describe hpa ml-api-hpa -n ml-serving
-
-# Check metrics-server
-kubectl top pods -n ml-serving
-```
-
-**Solutions:**
-```bash
-# 1. Ensure metrics-server is installed
-kubectl get deployment metrics-server -n kube-system
-
-# 2. Verify resource requests are set
-# HPA requires resource requests to be defined
-
-# 3. Check HPA configuration
-kubectl edit hpa ml-api-hpa -n ml-serving
-```
-
----
-
-## Debugging Commands Cheatsheet
-
-### Docker
+For Prometheus Operator:
 
 ```bash
-# View container logs
-docker logs <container-id>
-docker logs -f <container-id>  # Follow logs
-
-# Execute command in running container
-docker exec -it <container-id> /bin/bash
-
-# Inspect container
-docker inspect <container-id>
-
-# Check resource usage
-docker stats
+kubectl get servicemonitor ml-model-serving-monitor -o yaml
+kubectl get service ml-model-serving-service --show-labels
 ```
 
-### Kubernetes
+The ServiceMonitor selector must match the Service labels, its endpoint port must be named `http`, and the `release: monitoring` label must match the Prometheus installation selector.
+
+For Docker Compose, verify that Prometheus can reach `api:8000` on the Compose network:
 
 ```bash
-# Pod status
-kubectl get pods -n ml-serving
-kubectl describe pod <pod-name> -n ml-serving
-
-# Logs
-kubectl logs <pod-name> -n ml-serving
-kubectl logs -f deployment/ml-api -n ml-serving
-
-# Execute command in pod
-kubectl exec -it <pod-name> -n ml-serving -- /bin/bash
-
-# Port forward
-kubectl port-forward <pod-name> 8000:8000 -n ml-serving
-
-# Resource usage
-kubectl top pods -n ml-serving
-kubectl top nodes
-
-# Events
-kubectl get events -n ml-serving --sort-by='.lastTimestamp'
+docker compose logs prometheus
+docker compose exec prometheus wget -qO- http://api:8000/metrics
 ```
 
----
+## Grafana displays no data
 
-## Getting Help
+1. Open Prometheus at `http://localhost:9090` and query `api_requests_total`.
+2. Confirm the Grafana datasource URL is `http://prometheus:9090` inside Docker Compose.
+3. Generate traffic with `/health` or `/predict`.
+4. Select a recent dashboard time range.
 
-If you encounter issues not covered here:
+The repository provisions the datasource and dashboard provider, but it does not yet include a finished dashboard JSON file.
 
-1. Check application logs
-2. Search GitHub Issues
-3. Ask in Discussions
-4. Create a new Issue with:
-   - Error message
-   - Steps to reproduce
-   - Environment (Docker version, K8s version, etc.)
-   - Logs
+## GitHub Actions fails
 
----
+Open the failed job and expand the first red step. The pipeline is ordered, so later jobs are skipped when a required job fails.
 
-## Additional Resources
+Common cases:
 
-- [Docker Troubleshooting](https://docs.docker.com/config/containers/troubleshoot/)
-- [Kubernetes Troubleshooting](https://kubernetes.io/docs/tasks/debug/)
-- [FastAPI Debugging](https://fastapi.tiangolo.com/tutorial/debugging/)
+- **Formatting or linting:** run Black, isort, and flake8 locally.
+- **Tests or coverage:** run pytest and inspect the terminal coverage report.
+- **GHCR push:** verify workflow `packages: write` permission.
+- **Trivy SARIF upload:** optional and configured not to fail the Docker build.
+- **Kubernetes skipped:** set `ENABLE_DEPLOYMENT=true` only after adding `KUBECONFIG` for a reachable cluster.
+- **Slack skipped:** set `ENABLE_SLACK_NOTIFICATIONS=true` and add `SLACK_WEBHOOK_URL`.
+
+Local CI-equivalent commands:
+
+```bash
+./venv/bin/isort --check-only src tests
+./venv/bin/black --check src tests
+./venv/bin/flake8 src tests --max-line-length=100
+./venv/bin/pytest
+```
+
+## Requesting help
+
+Include the following when reporting a problem:
+
+- Exact command that failed
+- Complete final error block
+- `docker version` or `kubectl version`
+- `docker compose ps` or `kubectl get pods -o wide`
+- Relevant container or pod logs
+- Commit SHA and GitHub Actions run URL for CI failures
